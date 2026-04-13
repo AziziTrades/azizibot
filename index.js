@@ -430,6 +430,216 @@ async function checkBreakingNews() {
   } catch (e) { console.error('checkBreakingNews:', e.message); }
 }
 
+// ── HALT DETECTION ───────────────────────────────────────────────────────────
+async function checkHalts() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+  const now = Date.now();
+
+  // Check ALL top gappers via Polygon snapshot - most reliable method
+  for (const g of topGappers) {
+    try {
+      if (state.sentHalts.has(g.ticker)) continue;
+
+      const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${g.ticker}`);
+      const td = snap && snap.ticker;
+      if (!td) continue;
+
+      // lastTrade.t and lastQuote.t are millisecond timestamps from Polygon
+      const lastTradeMs = (td.lastTrade && td.lastTrade.t) || 0;
+      const lastQuoteMs = (td.lastQuote && td.lastQuote.t) || 0;
+
+      // Need both timestamps to exist and both be stale
+      if (!lastTradeMs || !lastQuoteMs) continue;
+
+      const tradeAgeSec = (now - lastTradeMs) / 1000;
+      const quoteAgeSec = (now - lastQuoteMs) / 1000;
+
+      // Halt = no trades AND no quotes for 2+ min, during active session, with real volume
+      if (tradeAgeSec < 120 || quoteAgeSec < 120) continue;
+      if (g.volume < 75000) continue;
+
+      state.sentHalts.add(g.ticker);
+      const minAgo = Math.floor(tradeAgeSec / 60);
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const line = `\`${etInfo.timeStr}\` ⏸ **HALT** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | RVol: ${fmtRVol(g.rvol)} | ~${minAgo}m ago`;
+      await post(WH.MAIN_CHAT, { content: line });
+      await sleep(300);
+      await post(WH.HALT_ALERTS, { content: line });
+      console.log(`[${etInfo.timeStr}] HALT: ${g.ticker} (trade age: ${Math.round(tradeAgeSec)}s, quote age: ${Math.round(quoteAgeSec)}s)`);
+      await sleep(200);
+    } catch(e) {}
+  }
+
+  // Clear resumed tickers
+  for (const ticker of [...state.sentHalts]) {
+    try {
+      const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+      const td = snap && snap.ticker;
+      if (!td) continue;
+      const lastTradeMs = (td.lastTrade && td.lastTrade.t) || 0;
+      if (lastTradeMs > 0 && (now - lastTradeMs) / 1000 < 60) {
+        state.sentHalts.delete(ticker);
+        const etI = getETInfo();
+        // Post resume alert
+        const g = topGappers.find(x => x.ticker === ticker);
+        if (g) {
+          const newsUrl = await getLatestNewsUrl(ticker);
+          const tickerLink = newsUrl ? `[${ticker}](<${newsUrl}>)` : `**${ticker}**`;
+          const line = `\`${etI.timeStr}\` ▶️ **RESUMED** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)}`;
+          await post(WH.MAIN_CHAT, { content: line });
+          await sleep(300);
+          await post(WH.HALT_ALERTS, { content: line });
+        }
+        console.log(`[${etI.timeStr}] RESUMED: ${ticker}`);
+      }
+    } catch(e) {}
+  }
+}
+
+// ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
+
+
+async function checkGreenBars() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+  const now = Date.now();
+  const from = now - 60 * 60 * 1000; // last 1 hour of candles
+
+  for (const g of topGappers.slice(0, 20)) {
+    try {
+      // Cooldown: max once per 15 min per ticker
+      const last = greenBarCooldown.get(g.ticker) || 0;
+      if (now - last < 15 * 60 * 1000) continue;
+
+      const fromTs = Math.floor(from / 1000);
+      const toTs = Math.floor(now / 1000);
+      const data = await polyGet(`/v2/aggs/ticker/${g.ticker}/range/5/minute/${fromTs}/${toTs}?adjusted=true&sort=desc&limit=10`);
+      const results = (data && data.results) || [];
+      if (results.length < 3) continue;
+
+      // results[0] = most recent candle (sort=desc)
+      // Check consecutive green bars (close > open)
+      let greenCount = 0;
+      for (const bar of results) {
+        if (bar.c > bar.o) greenCount++;
+        else break;
+      }
+
+      if (greenCount < 3) continue;
+
+      greenBarCooldown.set(g.ticker, now);
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const fv = await getFinvizData(g.ticker);
+      const si = fv.si !== '--' ? ` | SI: ${fv.si}` : '';
+      const ctb = fv.ctb ? ` | ${fv.ctb}` : '';
+      const regSho = fv.regSho ? ' | **Reg SHO**' : '';
+
+      const label = greenCount >= 5 ? `${greenCount} green bars 5m` : `${greenCount} green bars 5m`;
+      const line = `\`${etInfo.timeStr}\` ↗ ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` · \`${label}\` ~ 🇺🇸 | RVol: ${fmtRVol(g.rvol)}${regSho}${si}${ctb}`;
+      await post(WH.MAIN_CHAT, { content: line });
+      console.log(`[${etInfo.timeStr}] GREEN BARS: ${g.ticker} (${greenCount}x)`);
+      await sleep(400);
+    } catch(e) {}
+    await sleep(150); // avoid rate limits
+  }
+}
+
+const greenBarCooldown = new Map();
+
+// ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+
+
+async function checkGreenBars() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+
+  for (const g of topGappers.slice(0, 20)) {
+    try {
+      // Cooldown: once per 15 min per ticker
+      const last = greenBarCooldown.get(g.ticker) || 0;
+      if (Date.now() - last < 15 * 60 * 1000) continue;
+
+      // Fetch 5-min aggregates from Polygon
+      const now = new Date();
+      const from = new Date(now - 60 * 60 * 1000); // last 60 min
+      const fromStr = from.toISOString().slice(0, 10);
+      const toStr = now.toISOString().slice(0, 10);
+
+      const aggs = await polyGet(
+        `/v2/aggs/ticker/${g.ticker}/range/5/minute/${fromStr}/${toStr}?adjusted=true&sort=desc&limit=10`
+      );
+
+      if (!aggs || !aggs.results || aggs.results.length < 3) continue;
+
+      const bars = aggs.results; // newest first
+      // Count consecutive green bars (close > open)
+      let greenCount = 0;
+      for (const bar of bars) {
+        if (bar.c > bar.o) greenCount++;
+        else break;
+      }
+
+      if (greenCount < 3) continue;
+
+      greenBarCooldown.set(g.ticker, Date.now());
+      console.log(`[${etInfo.timeStr}] GREEN BARS: ${g.ticker} ${greenCount}x 5m`);
+
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const countLabel = greenCount >= 5 ? `${greenCount} 🔥` : `${greenCount}`;
+      const line = `\`${etInfo.timeStr}\` ↗ ${tickerLink} \`${priceFlag(g.price)}\` · ${countLabel} green bars 5m ~ 🇺🇸 | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\``;
+      await post(WH.MAIN_CHAT, { content: line });
+      await sleep(300);
+    } catch (e) {}
+  }
+}
+
+// ── BREAKING NEWS ─────────────────────────────────────────────────────────────
+async function checkBreakingNews() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+  const tickers = topGappers.map(g => g.ticker).join(',');
+  try {
+    const news = await fmpGet(`/stable/news/stock?symbols=${tickers}&limit=50`);
+    if (!Array.isArray(news)) return;
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    const fresh = news.filter(n => {
+      if (!n.publishedDate) return false;
+      const id = (n.url || n.title || '').slice(0, 100);
+      return new Date(n.publishedDate).getTime() > cutoff && !state.sentNews.has(id);
+    });
+    for (const n of fresh.slice(0, 5)) {
+      const id = (n.url || n.title || '').slice(0, 100);
+      state.sentNews.add(id);
+      const age = Math.floor((Date.now() - new Date(n.publishedDate).getTime()) / 60000);
+      const sent = (n.sentiment || '').toLowerCase();
+      const sentIcon = sent === 'positive' ? '📈' : sent === 'negative' ? '📉' : '📰';
+      const ticker = n.symbol || n.symbols || '';
+      const gapper = topGappers.find(g => g.ticker === ticker);
+      const priceCtx = gapper ? ` \`${priceFlag(gapper.price)}\` \`+${gapper.chgPct.toFixed(1)}%\`` : '';
+      const isOffering = /offering|shelf|ATM|dilut|direct offering|registered direct/i.test(n.title || '');
+      const offerFlag = isOffering ? ' ⚠️' : '';
+      const line = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${age}m ago — ${(n.title || '').slice(0, 100)}\n<${n.url || ''}>`;
+      await post(WH.MAIN_CHAT, { content: line });
+      await sleep(300);
+      if (!state.sentPRs.has(id)) {
+        state.sentPRs.add(id);
+        const prLink2 = n.url ? ` | [PR →](<${n.url}>)` : '';
+        const prLine = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${age}m ago — ${(n.title || '').slice(0, 90)}${prLink2}`;
+        await post(WH.PRESS_RELEASES, { content: prLine });
+        await sleep(300);
+      }
+    }
+    if (state.sentNews.size > 500) {
+      const arr = [...state.sentNews]; state.sentNews.clear();
+      arr.slice(-200).forEach(id => state.sentNews.add(id));
+    }
+  } catch (e) { console.error('checkBreakingNews:', e.message); }
+}
+
 // ── HALT DETECTION (Real NASDAQ halt feed) ───────────────────────────────────
 async function checkHalts() {
   if (!isActiveSession()) return;
