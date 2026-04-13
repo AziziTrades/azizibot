@@ -290,31 +290,54 @@ async function checkBreakingNews() {
   } catch (e) { console.error('checkBreakingNews:', e.message); }
 }
 
-// ── HALT DETECTION ────────────────────────────────────────────────────────────
+// ── HALT DETECTION (Polygon real halt data) ──────────────────────────────────
 async function checkHalts() {
   if (!isActiveSession() || !topGappers.length) return;
   const etInfo = getETInfo();
-  const now = Date.now();
-  for (const g of topGappers) {
-    const lastTrade = state.lastTrade.get(g.ticker) || 0;
-    const secsSince = lastTrade > 0 ? (now - lastTrade) / 1000 : 9999;
-    if (secsSince < 180 || g.volume < 5000) continue;
-    if (state.sentHalts.has(g.ticker)) continue;
-    state.sentHalts.add(g.ticker);
-    const minAgo = Math.floor(secsSince / 60);
-    const newsUrl = await getLatestNewsUrl(g.ticker);
-    const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
-    const line = `\`${etInfo.timeStr}\` ⏸ **HALT** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | Last trade: ${minAgo}m ago`;
-    await post(WH.MAIN_CHAT, { content: line });
-    await sleep(300);
-    await post(WH.HALT_ALERTS, { content: line });
-    await sleep(300);
-    console.log(`[${etInfo.timeStr}] HALT: ${g.ticker}`);
-  }
-  // Clear resumed tickers
-  for (const [ticker, lt] of state.lastTrade.entries()) {
-    if ((now - lt) / 1000 < 60) state.sentHalts.delete(ticker);
-  }
+  try {
+    // Use Polygon's real-time trading halt feed
+    const haltData = await polyGet('/v1/meta/conditions?asset_class=stocks&data_type=trades');
+    // Check each top gapper's snapshot for halt status
+    for (const g of topGappers) {
+      try {
+        const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${g.ticker}`);
+        const ticker_data = snap && snap.ticker;
+        if (!ticker_data) continue;
+
+        // Polygon snapshot: check if lastTrade is stale AND last quote has wide spread
+        const lastQuoteTime = ticker_data.lastQuote && ticker_data.lastQuote.t || 0;
+        const lastTradeTime = ticker_data.lastTrade && ticker_data.lastTrade.t || 0;
+        const now = Date.now();
+
+        // Real halt signal: no quotes AND no trades for 3+ minutes during market hours
+        const quoteAge = lastQuoteTime > 0 ? (now - lastQuoteTime) / 1000 : 9999;
+        const tradeAge = lastTradeTime > 0 ? (now - lastTradeTime) / 1000 : 9999;
+
+        // Must have BOTH stale quote AND stale trade to be a real halt
+        const isHalted = quoteAge > 180 && tradeAge > 180 && g.volume > 50000;
+        if (!isHalted || state.sentHalts.has(g.ticker)) continue;
+
+        state.sentHalts.add(g.ticker);
+        const minAgo = Math.floor(Math.min(quoteAge, tradeAge) / 60);
+        const newsUrl = await getLatestNewsUrl(g.ticker);
+        const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+        const line = `\`${etInfo.timeStr}\` ⏸ **HALT** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | Halted ~${minAgo}m ago`;
+        await post(WH.MAIN_CHAT, { content: line });
+        await sleep(300);
+        await post(WH.HALT_ALERTS, { content: line });
+        console.log(`[${etInfo.timeStr}] HALT: ${g.ticker} (quote age: ${Math.round(quoteAge)}s)`);
+        await sleep(200);
+      } catch(e) {}
+    }
+    // Clear resumed tickers - remove from halted set if trading again
+    for (const ticker of state.sentHalts) {
+      const ws_trade = state.lastTrade.get(ticker) || 0;
+      if (ws_trade > 0 && (Date.now() - ws_trade) / 1000 < 30) {
+        state.sentHalts.delete(ticker);
+        console.log(`[${etInfo.timeStr}] RESUMED: ${ticker}`);
+      }
+    }
+  } catch(e) { console.error('checkHalts:', e.message); }
 }
 
 // ── SEC FILINGS ───────────────────────────────────────────────────────────────
@@ -403,15 +426,30 @@ function connectWebSocket() {
       const messages = JSON.parse(data.toString());
       for (const msg of messages) {
         if (msg.ev === 'status' && msg.status === 'auth_success') {
-          // Subscribe only to our top 15 gappers for efficiency
-          const subs = topGappers.map(g => `T.${g.ticker}`).join(',');
-          if (subs) ws.send(JSON.stringify({ action: 'subscribe', params: subs }));
-          console.log(`WebSocket subscribed to ${topGappers.length} tickers`);
+          // Subscribe to trades + second aggregates for top gappers
+          // Also subscribe to status feed for real halt events
+          const tickerSubs = topGappers.map(g => `T.${g.ticker}`).join(',');
+          const aggSubs = topGappers.map(g => `A.${g.ticker}`).join(',');
+          const allSubs = [tickerSubs, aggSubs].filter(Boolean).join(',');
+          if (allSubs) ws.send(JSON.stringify({ action: 'subscribe', params: allSubs }));
+          console.log(`WebSocket subscribed to ${topGappers.length} tickers (trades + aggregates)`);
         }
         if (msg.ev === 'T') {
+          // Individual trade - most real-time
           const ticker = msg.sym;
           const price = msg.p;
           state.lastTrade.set(ticker, msg.t || Date.now());
+          const s = state.tickers.get(ticker);
+          if (s && price > s.high + 0.001) {
+            checkNHODForTicker(ticker, price).catch(() => {});
+          }
+        }
+        if (msg.ev === 'A') {
+          // Per-second aggregate - backup for NHOD detection
+          const ticker = msg.sym;
+          const price = msg.c || msg.h || 0; // close of the second
+          if (!price) return;
+          state.lastTrade.set(ticker, msg.e || Date.now()); // end timestamp
           const s = state.tickers.get(ticker);
           if (s && price > s.high + 0.001) {
             checkNHODForTicker(ticker, price).catch(() => {});
@@ -431,8 +469,10 @@ function connectWebSocket() {
 // Resubscribe when gapper list updates
 function resubscribeWebSocket() {
   if (ws && ws.readyState === WebSocket.OPEN && topGappers.length) {
-    const subs = topGappers.map(g => `T.${g.ticker}`).join(',');
-    ws.send(JSON.stringify({ action: 'subscribe', params: subs }));
+    const tickerSubs = topGappers.map(g => `T.${g.ticker}`).join(',');
+    const aggSubs = topGappers.map(g => `A.${g.ticker}`).join(',');
+    ws.send(JSON.stringify({ action: 'subscribe', params: tickerSubs + ',' + aggSubs }));
+    console.log(`[${getETInfo().timeStr}] Resubscribed to ${topGappers.length} tickers`);
   }
 }
 
