@@ -421,54 +421,57 @@ async function checkBreakingNews() {
   } catch (e) { console.error('checkBreakingNews:', e.message); }
 }
 
-// ── HALT DETECTION (Polygon real halt data) ──────────────────────────────────
+// ── HALT DETECTION ───────────────────────────────────────────────────────────
 async function checkHalts() {
   if (!isActiveSession() || !topGappers.length) return;
   const etInfo = getETInfo();
-  try {
-    // Use Polygon's real-time trading halt feed
-    const haltData = await polyGet('/v1/meta/conditions?asset_class=stocks&data_type=trades');
-    // Check each top gapper's snapshot for halt status
-    for (const g of topGappers) {
-      try {
-        const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${g.ticker}`);
-        const ticker_data = snap && snap.ticker;
-        if (!ticker_data) continue;
+  const now = Date.now();
 
-        // Polygon snapshot: check if lastTrade is stale AND last quote has wide spread
-        const lastQuoteTime = ticker_data.lastQuote && ticker_data.lastQuote.t || 0;
-        const lastTradeTime = ticker_data.lastTrade && ticker_data.lastTrade.t || 0;
-        const now = Date.now();
+  // Check ALL top gappers via individual REST snapshots - no WebSocket dependency
+  await Promise.all(topGappers.map(async (g) => {
+    try {
+      if (state.sentHalts.has(g.ticker)) return;
 
-        // Real halt signal: no quotes AND no trades for 3+ minutes during market hours
-        const quoteAge = lastQuoteTime > 0 ? (now - lastQuoteTime) / 1000 : 9999;
-        const tradeAge = lastTradeTime > 0 ? (now - lastTradeTime) / 1000 : 9999;
+      const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${g.ticker}`);
+      const td = snap && snap.ticker;
+      if (!td) return;
 
-        // Must have BOTH stale quote AND stale trade to be a real halt
-        const isHalted = quoteAge > 180 && tradeAge > 180 && g.volume > 50000;
-        if (!isHalted || state.sentHalts.has(g.ticker)) continue;
+      const lastTradeTime = (td.lastTrade && td.lastTrade.t) || 0;
+      const lastQuoteTime = (td.lastQuote && td.lastQuote.t) || 0;
 
-        state.sentHalts.add(g.ticker);
-        const minAgo = Math.floor(Math.min(quoteAge, tradeAge) / 60);
-        const newsUrl = await getLatestNewsUrl(g.ticker);
-        const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
-        const line = `\`${etInfo.timeStr}\` ⏸ **HALT** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | Halted ~${minAgo}m ago`;
-        await post(WH.MAIN_CHAT, { content: line });
-        await sleep(300);
-        await post(WH.HALT_ALERTS, { content: line });
-        console.log(`[${etInfo.timeStr}] HALT: ${g.ticker} (quote age: ${Math.round(quoteAge)}s)`);
-        await sleep(200);
-      } catch(e) {}
-    }
-    // Clear resumed tickers - remove from halted set if trading again
-    for (const ticker of state.sentHalts) {
-      const ws_trade = state.lastTrade.get(ticker) || 0;
-      if (ws_trade > 0 && (Date.now() - ws_trade) / 1000 < 30) {
+      // Both must be set and stale > 2 minutes
+      if (!lastTradeTime || !lastQuoteTime) return;
+      const tradeAge = (now - lastTradeTime) / 1000;
+      const quoteAge = (now - lastQuoteTime) / 1000;
+
+      if (tradeAge < 120 || quoteAge < 120) return; // not halted
+      if (g.volume < 50000) return; // needs real volume
+
+      state.sentHalts.add(g.ticker);
+      const minAgo = Math.floor(tradeAge / 60);
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const line = `\`${etInfo.timeStr}\` ⏸ **HALT** ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` ~ 🇺🇸 | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | Halted ~${minAgo}m ago`;
+      await post(WH.MAIN_CHAT, { content: line });
+      await sleep(300);
+      await post(WH.HALT_ALERTS, { content: line });
+      console.log(`[${etInfo.timeStr}] HALT: ${g.ticker} (${minAgo}m ago)`);
+    } catch(e) {}
+  }));
+
+  // Clear resumed tickers
+  for (const ticker of state.sentHalts) {
+    try {
+      const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+      const td = snap && snap.ticker;
+      if (!td) continue;
+      const lastTradeTime = (td.lastTrade && td.lastTrade.t) || 0;
+      if (lastTradeTime > 0 && (now - lastTradeTime) / 1000 < 60) {
         state.sentHalts.delete(ticker);
         console.log(`[${etInfo.timeStr}] RESUMED: ${ticker}`);
       }
-    }
-  } catch(e) { console.error('checkHalts:', e.message); }
+    } catch(e) {}
+  }
 }
 
 // ── SEC FILINGS ───────────────────────────────────────────────────────────────
