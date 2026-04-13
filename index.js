@@ -283,8 +283,20 @@ async function checkNHODForTicker(ticker, price) {
   const isUK = /^[A-Z]{2,4}L$/.test(t3);
   const flag = isChinese ? '🇨🇳' : isUK ? '🇬🇧' : '🇺🇸';
   // NSH = first new session high, NHOD = subsequent ones
+  // Fetch IO% and Market Cap
+  let ioStr = '', mcStr = '';
+  try {
+    const profile = await fmpGet(`/stable/profile?symbol=${ticker}`);
+    const p = Array.isArray(profile) ? profile[0] : profile;
+    if (p) {
+      const io = p.institutionalOwnershipPercentage || p.institutionalOwnership || 0;
+      const mc = p.mktCap || p.marketCap || 0;
+      if (io > 0) ioStr = ` | IO: ${(io * (io < 1 ? 100 : 1)).toFixed(2)}%`;
+      if (mc > 0) mcStr = ` | MC: ${fmtN(mc)}`;
+    }
+  } catch(e) {}
   const hodLabel = nhod === 1 ? 'NSH' : `${nhod} NHOD`;
-  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${hodLabel}${afterLull} ~ ${flag} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
+  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${hodLabel}${afterLull} ~ ${flag}${ioStr}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
   await post(WH.MAIN_CHAT, { content: line });
 }
 
@@ -390,47 +402,76 @@ async function checkGreenBars() {
   }
 }
 
-// ── BREAKING NEWS ─────────────────────────────────────────────────────────────
+// ── BREAKING NEWS (press release format) ────────────────────────────────────
 async function checkBreakingNews() {
-  if (!isActiveSession() || !topGappers.length) return;
+  if (!isActiveSession()) return;
   const etInfo = getETInfo();
-  const tickers = topGappers.map(g => g.ticker).join(',');
+
+  // Build watchlist - top gappers + any stock that had volume today
+  const watchTickers = [...new Set(topGappers.map(g => g.ticker))];
+  if (!watchTickers.length) return;
+
   try {
+    const tickers = watchTickers.join(',');
     const news = await fmpGet(`/stable/news/stock?symbols=${tickers}&limit=50`);
     if (!Array.isArray(news)) return;
-    const cutoff = Date.now() - 5 * 60 * 1000;
+
+    const cutoff = Date.now() - 5 * 60 * 1000; // last 5 min
     const fresh = news.filter(n => {
       if (!n.publishedDate) return false;
       const id = (n.url || n.title || '').slice(0, 100);
       return new Date(n.publishedDate).getTime() > cutoff && !state.sentNews.has(id);
     });
+
     for (const n of fresh.slice(0, 5)) {
       const id = (n.url || n.title || '').slice(0, 100);
       state.sentNews.add(id);
-      const age = Math.floor((Date.now() - new Date(n.publishedDate).getTime()) / 60000);
-      const sent = (n.sentiment || '').toLowerCase();
-      const sentIcon = sent === 'positive' ? '📈' : sent === 'negative' ? '📉' : '📰';
+
+      const ageSec = Math.floor((Date.now() - new Date(n.publishedDate).getTime()) / 1000);
+      const ageStr = ageSec < 60 ? `${ageSec} seconds ago` : `${Math.floor(ageSec/60)} min ago`;
       const ticker = n.symbol || n.symbols || '';
+      const title = (n.title || '').slice(0, 200);
+      const link = n.url || '';
       const gapper = topGappers.find(g => g.ticker === ticker);
-      const priceCtx = gapper ? ` \`${priceFlag(gapper.price)}\` \`+${gapper.chgPct.toFixed(1)}%\`` : '';
-      const isOffering = /offering|shelf|ATM|dilut|direct offering|registered direct/i.test(n.title || '');
-      const offerFlag = isOffering ? ' ⚠️' : '';
-      const line = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${age}m ago — ${(n.title || '').slice(0, 100)}\n<${n.url || ''}>`;
-      await post(WH.MAIN_CHAT, { content: line });
+      const isOffering = /offering|shelf|ATM|dilut|direct offering|registered direct/i.test(title);
+
+      // NuntioBot-style embed format
+      const embedDesc = `${title}
+${link ? `[Link](<${link}>)` : ''}`;
+      const color = isOffering ? 0xf0a500 :
+        (n.sentiment||'').toLowerCase() === 'positive' ? 0x39d353 :
+        (n.sentiment||'').toLowerCase() === 'negative' ? 0xf85149 : 0x5865f2;
+
+      // Post to press-releases as embed
+      await post(WH.PRESS_RELEASES, {
+        embeds: [{
+          title: `${ticker} — ${ageStr}`,
+          description: embedDesc,
+          color,
+          timestamp: new Date(n.publishedDate).toISOString()
+        }]
+      });
       await sleep(300);
-      if (!state.sentPRs.has(id)) {
-        state.sentPRs.add(id);
-        const prLink2 = n.url ? ` | [PR →](<${n.url}>)` : '';
-        const prLine = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${age}m ago — ${(n.title || '').slice(0, 90)}${prLink2}`;
-        await post(WH.PRESS_RELEASES, { content: prLine });
-        await sleep(300);
-      }
+
+      // Also post to main-chat as compact line
+      const priceCtx = gapper ? ` \`${priceFlag(gapper.price)}\` \`+${gapper.chgPct.toFixed(1)}%\`` : '';
+      const offerFlag = isOffering ? ' ⚠️' : '';
+      const sentIcon = (n.sentiment||'').toLowerCase() === 'positive' ? '📈' :
+                       (n.sentiment||'').toLowerCase() === 'negative' ? '📉' : '📰';
+      const mainLine = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${ageStr} — ${title.slice(0, 90)}${link ? ` | [PR →](<${link}>)` : ''}`;
+      await post(WH.MAIN_CHAT, { content: mainLine });
+      await sleep(300);
+
+      console.log(`[${etInfo.timeStr}] NEWS: ${ticker} - ${title.slice(0,50)}`);
     }
+
+    // Trim seen set
     if (state.sentNews.size > 500) {
-      const arr = [...state.sentNews]; state.sentNews.clear();
+      const arr = [...state.sentNews];
+      state.sentNews.clear();
       arr.slice(-200).forEach(id => state.sentNews.add(id));
     }
-  } catch (e) { console.error('checkBreakingNews:', e.message); }
+  } catch(e) { console.error('checkBreakingNews:', e.message); }
 }
 
 // ── HALT DETECTION ───────────────────────────────────────────────────────────
@@ -929,7 +970,7 @@ async function checkHalts() {
   }
 }
 
-// ── SEC FILINGS ───────────────────────────────────────────────────────────────
+// ── SEC FILINGS (all form types) ────────────────────────────────────────────
 let lastFilingCheck = 0;
 async function checkSECFilings() {
   if (!isActiveSession() || !topGappers.length) return;
@@ -937,29 +978,34 @@ async function checkSECFilings() {
   lastFilingCheck = Date.now();
   const etInfo = getETInfo();
   const cutoff = Date.now() - 30 * 60 * 1000;
-  for (const g of topGappers.slice(0, 10)) {
+
+  for (const g of topGappers.slice(0, 15)) {
     try {
-      const filings = await fmpGet(`/stable/rss-feed-8k?symbol=${g.ticker}&limit=5`);
+      // Fetch ALL recent filings not just 8-K
+      const filings = await fmpGet(`/stable/sec-filings?symbol=${g.ticker}&limit=5`);
       if (!Array.isArray(filings)) continue;
-      for (const f of filings.slice(0, 2)) {
+      for (const f of filings) {
         const filed = new Date(f.date || f.filledDate || f.acceptedDate || 0).getTime();
         const id = (f.link || f.url || f.title || '').slice(0, 80);
         if (filed <= cutoff || state.sentFilings.has(id)) continue;
         state.sentFilings.add(id);
         const formType = (f.formType || f.type || 'SEC').toUpperCase();
-        const link = f.link || f.url || `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${g.ticker}`;
-        const isDilutive = /S-3|S-1|424B|ATM|DEFA14/i.test(formType);
-        const isUrgent = /8-K/i.test(formType);
-        const icon = isDilutive ? '💧' : isUrgent ? '📋' : '📄';
-        const flag = isDilutive ? ' ⚠️ **DILUTION RISK**' : isUrgent ? ' 📌' : '';
-        const line = `\`${etInfo.timeStr}\` ${icon} **${g.ticker}** \`${formType}\`${flag} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\` | [View Filing](<${link}>)`;
+        const link = f.link || f.url || '';
+        const isDilutive = /S-3|S-1|424B|ATM|DEFA14/.test(formType);
+        const linkStr = link ? ` — [Link](<${link}>)` : '';
+        const flag = isDilutive ? ' ⚠️' : '';
+        // Simple NuntioBot-style format
+        const line = `\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${flag} — Form ${formType}${linkStr}`;
         await post(WH.SEC_FILINGS, { content: line });
         await sleep(300);
-        await post(WH.MAIN_CHAT, { content: line });
+        // Also post to main-chat
+        const mainLine = `\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${flag} — Form ${formType} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\`${linkStr}`;
+        await post(WH.MAIN_CHAT, { content: mainLine });
         await sleep(300);
+        console.log(`[${etInfo.timeStr}] SEC: ${g.ticker} ${formType}`);
       }
-      await sleep(200);
-    } catch (e) {}
+      await sleep(150);
+    } catch(e) {}
   }
 }
 
