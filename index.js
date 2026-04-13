@@ -198,12 +198,21 @@ async function refreshTopGappers() {
       const high = (t.day && t.day.h) || lp;
       return { ticker: t.ticker, price: lp, prev, chgPct: chg, volume: vol, prevVol, rvol, high };
     })
-    .filter(t =>
-      t.chgPct >= 5 &&
-      t.price >= 0.1 &&
-      t.price <= 20 &&
-      t.volume >= 50000  // minimum 50K volume - removes illiquid/warrant stocks
-    )
+    .filter(t => {
+      // Exclude warrants, rights, units - tickers ending in W, R, U, WS, WT
+      const sym = t.ticker;
+      const isWarrant = /W$|WS$|WT$|R$|U$/.test(sym);
+      // Exclude preferred shares (ticker ending in P, A-Z after base)
+      const isPreferred = sym.length > 4 && /[A-Z]$/.test(sym) && !/^[A-Z]{1,4}$/.test(sym);
+      return (
+        t.chgPct >= 5 &&
+        t.price >= 0.1 &&
+        t.price <= 20 &&
+        t.volume >= 100000 &&   // minimum 100K volume
+        !isWarrant &&
+        !isPreferred
+      );
+    })
     .sort((a, b) => b.chgPct - a.chgPct)
     .slice(0, 30);
 
