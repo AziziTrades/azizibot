@@ -202,15 +202,15 @@ async function refreshTopGappers() {
       const sym = t.ticker;
       // Exclude warrants, rights, units
       const isWarrant = /W$|WS$|WT$|R$|U$/.test(sym);
-      // Exclude preferred shares
-      const isPreferred = sym.length > 4 && /[A-Z]$/.test(sym) && !/^[A-Z]{1,4}$/.test(sym);
-      // Exclude OTC/Pink Sheet stocks - 5-letter tickers or ending in F (foreign OTC)
-      const isOTC = sym.length >= 5 || /F$/.test(sym);
+      // Exclude preferred shares (e.g. BACPB, GS-A style)
+      const isPreferred = /[A-Z]$/.test(sym) && sym.length > 5;
+      // Exclude pure OTC penny tickers (6+ letters) and F-suffix foreign OTC
+      const isOTC = sym.length >= 6 || (/F$/.test(sym) && sym.length === 5);
       return (
         t.chgPct >= 5 &&
         t.price >= 0.1 &&
         t.price <= 20 &&
-        t.volume >= 100000 &&
+        t.volume >= 75000 &&   // lowered to 75K to catch more valid moves
         !isWarrant &&
         !isPreferred &&
         !isOTC
@@ -277,7 +277,10 @@ async function checkNHODForTicker(ticker, price) {
     }
   }
 
-  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${nhod} NHOD${afterLull} ~ 🇺🇸 | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
+  // Detect country flag from ticker pattern
+  const isChinese = /^[A-Z]{2,4}O$|^[A-Z]{2,4}Y$/.test(gapper.ticker) || (fv.si === '--' && gapper.ticker.length >= 3);
+  const flag = isChinese ? '🇨🇳' : '🇺🇸';
+  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${nhod} NHOD${afterLull} ~ ${flag} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
   await post(WH.MAIN_CHAT, { content: line });
 }
 
