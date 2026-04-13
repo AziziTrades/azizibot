@@ -178,6 +178,7 @@ const state = {
   sentPRs: new Set(),
   morningPosted: new Set(),
   lastTrade: new Map(),
+  priceHistory: new Map(), // ticker -> [{price, time}] for after-lull detection
 };
 
 // ── TOP GAPPERS ───────────────────────────────────────────────────────────────
@@ -199,7 +200,7 @@ async function refreshTopGappers() {
     })
     .filter(t => t.chgPct >= 5 && t.price >= 0.1 && t.price <= 20)
     .sort((a, b) => b.chgPct - a.chgPct)
-    .slice(0, 15);
+    .slice(0, 30);
 
     for (const g of topGappers) {
       const existing = state.tickers.get(g.ticker) || { high: 0, nhod: 0 };
@@ -245,7 +246,21 @@ async function checkNHODForTicker(ticker, price) {
   const ctb = fv.ctb ? ` | ${fv.ctb}` : '';
   const rsStr = rs ? ` | ${rs}` : '';
 
-  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${nhod} NHOD ~ 🇺🇸 | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
+  // After-lull detection: was price flat for 10+ min then spiked?
+  let afterLull = '';
+  const hist = state.priceHistory.get(ticker) || [];
+  if (hist.length >= 10) {
+    const tenMinAgo = Date.now() - 10 * 60 * 1000;
+    const oldPrices = hist.filter(h => h.time < tenMinAgo);
+    if (oldPrices.length >= 3) {
+      const oldHigh = Math.max(...oldPrices.map(h => h.price));
+      const oldLow = Math.min(...oldPrices.map(h => h.price));
+      const wasFlat = (oldHigh - oldLow) / oldLow < 0.02; // <2% range = flat
+      if (wasFlat && price > oldHigh * 1.03) afterLull = ' · `after-lull`';
+    }
+  }
+
+  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${nhod} NHOD${afterLull} ~ 🇺🇸 | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
   await post(WH.MAIN_CHAT, { content: line });
 }
 
@@ -279,7 +294,9 @@ async function checkBreakingNews() {
       await sleep(300);
       if (!state.sentPRs.has(id)) {
         state.sentPRs.add(id);
-        await post(WH.PRESS_RELEASES, { content: line });
+        const prLink2 = n.url ? ` | [PR →](<${n.url}>)` : '';
+        const prLine = `\`${etInfo.timeStr}\` ${sentIcon}${offerFlag} **${ticker}**${priceCtx} ${age}m ago — ${(n.title || '').slice(0, 90)}${prLink2}`;
+        await post(WH.PRESS_RELEASES, { content: prLine });
         await sleep(300);
       }
     }
@@ -438,7 +455,14 @@ function connectWebSocket() {
           // Individual trade - most real-time
           const ticker = msg.sym;
           const price = msg.p;
-          state.lastTrade.set(ticker, msg.t || Date.now());
+          const now = Date.now();
+          state.lastTrade.set(ticker, msg.t || now);
+          // Track price history for after-lull detection
+          if (!state.priceHistory.has(ticker)) state.priceHistory.set(ticker, []);
+          const hist = state.priceHistory.get(ticker);
+          hist.push({ price, time: now });
+          // Keep only last 60 entries
+          if (hist.length > 60) hist.shift();
           const s = state.tickers.get(ticker);
           if (s && price > s.high + 0.001) {
             checkNHODForTicker(ticker, price).catch(() => {});
@@ -472,7 +496,7 @@ function resubscribeWebSocket() {
     const tickerSubs = topGappers.map(g => `T.${g.ticker}`).join(',');
     const aggSubs = topGappers.map(g => `A.${g.ticker}`).join(',');
     ws.send(JSON.stringify({ action: 'subscribe', params: tickerSubs + ',' + aggSubs }));
-    console.log(`[${getETInfo().timeStr}] Resubscribed to ${topGappers.length} tickers`);
+    console.log(`[${getETInfo().timeStr}] Resubscribed to ${topGappers.length} tickers (trades+aggs)`);
   }
 }
 
