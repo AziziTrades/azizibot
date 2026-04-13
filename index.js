@@ -249,6 +249,78 @@ async function checkNHODForTicker(ticker, price) {
   await post(WH.MAIN_CHAT, { content: line });
 }
 
+// ── PR SPIKE DETECTION (NuntioBot "PR - Spike" style) ────────────────────────
+const prSpikeCooldown = new Map();
+
+async function checkPRSpike() {
+  if (!isActive() || !topGappers.length) return;
+  const etInfo = getETInfo();
+
+  // Get all tickers that are up 5%+ today
+  const watchlist = topGappers.filter(g => g.chgPct >= 5);
+  if (!watchlist.length) return;
+
+  const tickers = watchlist.map(g => g.ticker).join(',');
+  try {
+    const news = await fmpGet(`/stable/news/stock?symbols=${tickers}&limit=50`);
+    if (!Array.isArray(news)) return;
+
+    const cutoff = Date.now() - 10 * 60 * 1000; // last 10 min
+
+    for (const n of news) {
+      if (!n.publishedDate) continue;
+      const pubTime = new Date(n.publishedDate).getTime();
+      if (pubTime < cutoff) continue;
+
+      const ticker = n.symbol || n.symbols || '';
+      if (!ticker) continue;
+
+      const id = `prspike_${(n.url || n.title || '').slice(0, 80)}`;
+      if (state.sentNews.has(id)) continue;
+
+      const gapper = watchlist.find(g => g.ticker === ticker);
+      if (!gapper) continue;
+
+      // Only fire if stock spiked significantly (10%+) AND has fresh PR
+      if (gapper.chgPct < 10) continue;
+
+      // Cooldown: once per ticker per 30 min
+      const last = prSpikeCooldown.get(ticker) || 0;
+      if (Date.now() - last < 30 * 60 * 1000) continue;
+      prSpikeCooldown.set(ticker, Date.now());
+
+      state.sentNews.add(id);
+
+      // Fetch IO% and MC
+      let ioStr = '', mcStr = '';
+      try {
+        const profile = await fmpGet(`/stable/profile?symbol=${ticker}`);
+        const p = Array.isArray(profile) ? profile[0] : profile;
+        if (p) {
+          const io = p.institutionalOwnershipPercentage || p.institutionalOwnership || 0;
+          const mc = p.mktCap || p.marketCap || 0;
+          if (io > 0) ioStr = ` | IO: ${(io < 1 ? io * 100 : io).toFixed(2)}%`;
+          if (mc > 0) mcStr = ` | MC: ${fmtN(mc)}`;
+        }
+      } catch(e) {}
+
+      const title = (n.title || '').slice(0, 200);
+      const link = n.url ? ` - [Link](<${n.url}>)` : '';
+      const flag = countryFlag(ticker);
+
+      // NuntioBot PR-Spike format:
+      // TICKER <$X - Full headline - Link ~ FLAG | IO: X% | MC: XM
+      const line = `**${ticker}** \`${priceFlag(gapper.price)}\` - ${title}${link} ~ ${flag}${ioStr}${mcStr}`;
+
+      await post(WH.PRESS_RELEASES, { content: line });
+      await sleep(300);
+      await post(WH.MAIN_CHAT, { content: `\`${etInfo.timeStr}\` 📰 ${line}` });
+      await sleep(300);
+      console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker} - ${title.slice(0, 50)}`);
+    }
+  } catch(e) { console.error('checkPRSpike:', e.message); }
+}
+
 // ── BREAKING NEWS ─────────────────────────────────────────────────────────────
 async function checkBreakingNews() {
   if (!isActive() || !topGappers.length) return;
@@ -516,6 +588,7 @@ async function main() {
   // Poll every 60s
   setInterval(async () => {
     await checkMorningSnapshot();
+    await checkPRSpike();
     await checkGreenBars();
     await checkBreakingNews();
     await checkHalts();
