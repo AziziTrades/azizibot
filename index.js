@@ -229,13 +229,9 @@ async function checkNHODForTicker(ticker, price) {
   const nhod = (s.nhod || 0) + 1;
   state.tickers.set(ticker, { ...s, high: price, nhod });
 
-  // Only alert on 1st NHOD, then every 5th (5, 10, 15, 20...)
-  const shouldAlert = nhod === 1 || nhod % 5 === 0;
-  if (!shouldAlert) return;
-
-  // Extra cooldown: never alert same ticker more than once per 3 min regardless
+  // Only alert once every 5 minutes per ticker
   const last = nhoodCooldown.get(ticker) || 0;
-  if (Date.now() - last < 3 * 60 * 1000) return;
+  if (Date.now() - last < 5 * 60 * 1000) return;
   nhoodCooldown.set(ticker, Date.now());
   console.log(`[${etInfo.timeStr}] ⚡ NHOD ${ticker} $${price.toFixed(2)} (${nhod}x)`);
 
