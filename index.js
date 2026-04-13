@@ -346,35 +346,74 @@ async function checkGreenBars() {
   }
 }
 
-// ── SEC FILINGS ───────────────────────────────────────────────────────────────
+// ── SEC FILINGS (SEC EDGAR RSS - real-time) ──────────────────────────────────
+let lastFilingCheck = 0;
 async function checkSECFilings() {
   if (!isActive() || !topGappers.length) return;
-  if (Date.now() - lastFilingCheck < 5 * 60 * 1000) return;
+  if (Date.now() - lastFilingCheck < 2 * 60 * 1000) return; // check every 2 min
   lastFilingCheck = Date.now();
   const etInfo = getETInfo();
-  const cutoff = Date.now() - 30 * 60 * 1000;
-  for (const g of topGappers.slice(0, 15)) {
-    try {
-      const filings = await fmpGet(`/stable/sec-filings?symbol=${g.ticker}&limit=5`);
-      if (!Array.isArray(filings)) continue;
-      for (const f of filings) {
-        const filed = new Date(f.date || f.filledDate || f.acceptedDate || 0).getTime();
-        const id = (f.link || f.url || f.title || '').slice(0, 80);
-        if (filed <= cutoff || state.sentFilings.has(id)) continue;
-        state.sentFilings.add(id);
-        const formType = (f.formType || f.type || 'SEC').toUpperCase();
-        const link = f.link || f.url || '';
-        const isDilutive = /S-3|S-1|424B|ATM|DEFA14/.test(formType);
-        const linkStr = link ? ` — [Link](<${link}>)` : '';
-        const line = `\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${isDilutive ? ' ⚠️' : ''} — Form ${formType}${linkStr}`;
-        await post(WH.SEC_FILINGS, { content: line });
-        await sleep(300);
-        await post(WH.MAIN_CHAT, { content: `${line} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\`` });
-        await sleep(300);
-        console.log(`[${etInfo.timeStr}] SEC: ${g.ticker} ${formType}`);
-      }
-      await sleep(150);
-    } catch(e) {}
+  const cutoff = Date.now() - 10 * 60 * 1000; // last 10 min
+
+  // Use SEC EDGAR full-text RSS - catches ALL filings in real-time
+  try {
+    const rss = await new Promise((resolve, reject) => {
+      const req = https.get('https://efts.sec.gov/LATEST/search-index?q=%22424B5%22%20OR%20%228-K%22%20OR%20%22S-3%22%20OR%20%22S-1%22%20OR%20%2213G%22&dateRange=custom&startdt=' + new Date(Date.now() - 15*60*1000).toISOString().slice(0,19) + '&enddt=' + new Date().toISOString().slice(0,19) + '&hits.hits._source=period_of_report,entity_name,file_num,period_of_report,form_type,biz_location,inc_states&hits.hits.highlight.body=&hits.hits.total=true', {
+        headers: { 'User-Agent': 'AziziBot/1.0 admin@azizibot.com' }
+      }, res => {
+        let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(null); } });
+      });
+      req.on('error', reject);
+      req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    const hits = (rss && rss.hits && rss.hits.hits) || [];
+    for (const hit of hits.slice(0, 20)) {
+      const src = hit._source || {};
+      const ticker = (src.entity_name || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
+      const formType = (src.form_type || '').toUpperCase();
+      const id = hit._id || (ticker + formType);
+
+      if (state.sentFilings.has(id)) continue;
+
+      // Only alert if ticker is in our watchlist
+      const gapper = topGappers.find(g => g.ticker === ticker);
+      if (!gapper) continue;
+
+      state.sentFilings.add(id);
+      const link = `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${ticker}&type=${formType}&dateb=&owner=include&count=5`;
+      const isDilutive = /S-3|S-1|424B|ATM|DEFA14/.test(formType);
+      const line = `\`${etInfo.timeStr}\` **SEC** **${ticker}**${isDilutive ? ' ⚠️' : ''} — Form ${formType} — [Link](<${link}>)`;
+      await post(WH.SEC_FILINGS, { content: line });
+      await sleep(300);
+      await post(WH.MAIN_CHAT, { content: `${line} | $${gapper.price.toFixed(2)} \`+${gapper.chgPct.toFixed(1)}%\`` });
+      await sleep(300);
+      console.log(`[${etInfo.timeStr}] SEC: ${ticker} ${formType}`);
+    }
+  } catch(e) {
+    // Fallback: FMP endpoint per ticker
+    for (const g of topGappers.slice(0, 20)) {
+      try {
+        const filings = await fmpGet(`/stable/sec-filings?symbol=${g.ticker}&limit=3`);
+        if (!Array.isArray(filings)) continue;
+        for (const f of filings) {
+          const filed = new Date(f.date || f.filledDate || f.acceptedDate || 0).getTime();
+          const id = (f.link || f.url || f.title || '').slice(0, 80);
+          if (filed <= cutoff || state.sentFilings.has(id)) continue;
+          state.sentFilings.add(id);
+          const formType = (f.formType || f.type || 'SEC').toUpperCase();
+          const link = f.link || f.url || '';
+          const isDilutive = /S-3|S-1|424B|ATM|DEFA14/.test(formType);
+          const linkStr = link ? ` — [Link](<${link}>)` : '';
+          const line = `\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${isDilutive ? ' ⚠️' : ''} — Form ${formType}${linkStr}`;
+          await post(WH.SEC_FILINGS, { content: line });
+          await sleep(300);
+          await post(WH.MAIN_CHAT, { content: `${line} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\`` });
+          await sleep(300);
+        }
+        await sleep(100);
+      } catch(e2) {}
+    }
   }
 }
 
