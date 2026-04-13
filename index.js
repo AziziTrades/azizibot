@@ -138,9 +138,10 @@ let lastFilingCheck = 0;
 async function refreshTopGappers() {
   try {
     // Fetch gainers + actives to catch all movers like SNYR
-    const [pg, pa] = await Promise.all([
+    const [pg, pa, pv] = await Promise.all([
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers?include_otc=true'),
-      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?include_otc=true&sort=changePercent&direction=desc&limit=100')
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?include_otc=true&sort=changePercent&direction=desc&limit=100'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?include_otc=true&sort=volume&direction=desc&limit=100')
     ]);
 
     const merge = new Map();
@@ -157,6 +158,7 @@ async function refreshTopGappers() {
 
     for (const t of ((pg && pg.tickers) || [])) merge.set(t.ticker, process(t));
     for (const t of ((pa && pa.tickers) || [])) { if (!merge.has(t.ticker)) merge.set(t.ticker, process(t)); }
+    for (const t of ((pv && pv.tickers) || [])) { if (!merge.has(t.ticker)) merge.set(t.ticker, process(t)); }
 
     topGappers = [...merge.values()]
       .filter(t => t.chgPct >= 5 && t.price >= 0.1 && t.price <= 20)
@@ -226,7 +228,24 @@ async function checkNHODForTicker(ticker, price) {
   const ctb = fv.ctb ? ` | ${fv.ctb}` : '';
   const rsStr = rs ? ` | ${rs}` : '';
 
-  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${hodLabel}${afterLull} ~ ${flag}${ioStr}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
+  // Check for fresh PR to attach inline (NuntioBot PR+ style)
+  let prInline = '';
+  try {
+    const recentNews = await fmpGet(`/stable/news/stock?symbols=${ticker}&limit=3`);
+    if (Array.isArray(recentNews) && recentNews.length) {
+      const freshPR = recentNews.find(n => {
+        const age = (Date.now() - new Date(n.publishedDate).getTime()) / 60000;
+        return age < 60 && n.url; // within last 60 min
+      });
+      if (freshPR) {
+        prInline = ` | [PR+](<${freshPR.url}>)`;
+        // Also mark as seen so it doesn't double-post
+        state.sentNews.add((freshPR.url || freshPR.title || '').slice(0, 100));
+      }
+    }
+  } catch(e) {}
+
+  const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${hodLabel}${afterLull} ~ ${flag}${ioStr}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}${prInline}`;
   await post(WH.MAIN_CHAT, { content: line });
 }
 
