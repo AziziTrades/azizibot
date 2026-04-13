@@ -291,6 +291,9 @@ async function checkNHODForTicker(ticker, price) {
 // ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
 
 
+
+const greenBarCooldown = new Map();
+
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
   const etInfo = getETInfo();
@@ -337,9 +340,9 @@ async function checkGreenBars() {
   }
 }
 
-const greenBarCooldown = new Map();
 
 // ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+
 
 
 async function checkGreenBars() {
@@ -501,6 +504,7 @@ async function checkHalts() {
 // ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
 
 
+
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
   const etInfo = getETInfo();
@@ -547,9 +551,9 @@ async function checkGreenBars() {
   }
 }
 
-const greenBarCooldown = new Map();
 
 // ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+
 
 
 async function checkGreenBars() {
@@ -732,6 +736,7 @@ async function checkHalts() {
 // ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
 
 
+
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
   const etInfo = getETInfo();
@@ -780,6 +785,7 @@ async function checkGreenBars() {
 
 
 // ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+
 
 
 async function checkGreenBars() {
