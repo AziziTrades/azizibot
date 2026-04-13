@@ -249,7 +249,7 @@ async function checkNHODForTicker(ticker, price) {
 
   // Only alert once every 5 minutes per ticker
   const last = nhoodCooldown.get(ticker) || 0;
-  if (Date.now() - last < 15 * 60 * 1000) return; // max 1 alert per 15 min per ticker
+  if (Date.now() - last < 10 * 60 * 1000) return; // max 1 alert per 10 min per ticker
   nhoodCooldown.set(ticker, Date.now());
   console.log(`[${etInfo.timeStr}] ⚡ NHOD ${ticker} $${price.toFixed(2)} (${nhod}x)`);
 
