@@ -198,7 +198,12 @@ async function refreshTopGappers() {
       const high = (t.day && t.day.h) || lp;
       return { ticker: t.ticker, price: lp, prev, chgPct: chg, volume: vol, prevVol, rvol, high };
     })
-    .filter(t => t.chgPct >= 5 && t.price >= 0.1 && t.price <= 20)
+    .filter(t =>
+      t.chgPct >= 5 &&
+      t.price >= 0.1 &&
+      t.price <= 20 &&
+      t.volume >= 50000  // minimum 50K volume - removes illiquid/warrant stocks
+    )
     .sort((a, b) => b.chgPct - a.chgPct)
     .slice(0, 30);
 
@@ -262,6 +267,103 @@ async function checkNHODForTicker(ticker, price) {
 
   const line = `\`${etInfo.timeStr}\` ↑ ${tickerLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${nhod} NHOD${afterLull} ~ 🇺🇸 | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}`;
   await post(WH.MAIN_CHAT, { content: line });
+}
+
+// ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
+const greenBarsCooldown = new Map();
+
+async function checkGreenBars() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+  const now = Date.now();
+  const from = now - 60 * 60 * 1000; // last 1 hour of candles
+
+  for (const g of topGappers.slice(0, 20)) {
+    try {
+      // Cooldown: max once per 15 min per ticker
+      const last = greenBarsCooldown.get(g.ticker) || 0;
+      if (now - last < 15 * 60 * 1000) continue;
+
+      const fromTs = Math.floor(from / 1000);
+      const toTs = Math.floor(now / 1000);
+      const data = await polyGet(`/v2/aggs/ticker/${g.ticker}/range/5/minute/${fromTs}/${toTs}?adjusted=true&sort=desc&limit=10`);
+      const results = (data && data.results) || [];
+      if (results.length < 3) continue;
+
+      // results[0] = most recent candle (sort=desc)
+      // Check consecutive green bars (close > open)
+      let greenCount = 0;
+      for (const bar of results) {
+        if (bar.c > bar.o) greenCount++;
+        else break;
+      }
+
+      if (greenCount < 3) continue;
+
+      greenBarsCooldown.set(g.ticker, now);
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const fv = await getFinvizData(g.ticker);
+      const si = fv.si !== '--' ? ` | SI: ${fv.si}` : '';
+      const ctb = fv.ctb ? ` | ${fv.ctb}` : '';
+      const regSho = fv.regSho ? ' | **Reg SHO**' : '';
+
+      const label = greenCount >= 5 ? `${greenCount} green bars 5m` : `${greenCount} green bars 5m`;
+      const line = `\`${etInfo.timeStr}\` ↗ ${tickerLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` · \`${label}\` ~ 🇺🇸 | RVol: ${fmtRVol(g.rvol)}${regSho}${si}${ctb}`;
+      await post(WH.MAIN_CHAT, { content: line });
+      console.log(`[${etInfo.timeStr}] GREEN BARS: ${g.ticker} (${greenCount}x)`);
+      await sleep(400);
+    } catch(e) {}
+    await sleep(150); // avoid rate limits
+  }
+}
+
+// ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+const greenBarCooldown = new Map();
+
+async function checkGreenBars() {
+  if (!isActiveSession() || !topGappers.length) return;
+  const etInfo = getETInfo();
+
+  for (const g of topGappers.slice(0, 20)) {
+    try {
+      // Cooldown: once per 15 min per ticker
+      const last = greenBarCooldown.get(g.ticker) || 0;
+      if (Date.now() - last < 15 * 60 * 1000) continue;
+
+      // Fetch 5-min aggregates from Polygon
+      const now = new Date();
+      const from = new Date(now - 60 * 60 * 1000); // last 60 min
+      const fromStr = from.toISOString().slice(0, 10);
+      const toStr = now.toISOString().slice(0, 10);
+
+      const aggs = await polyGet(
+        `/v2/aggs/ticker/${g.ticker}/range/5/minute/${fromStr}/${toStr}?adjusted=true&sort=desc&limit=10`
+      );
+
+      if (!aggs || !aggs.results || aggs.results.length < 3) continue;
+
+      const bars = aggs.results; // newest first
+      // Count consecutive green bars (close > open)
+      let greenCount = 0;
+      for (const bar of bars) {
+        if (bar.c > bar.o) greenCount++;
+        else break;
+      }
+
+      if (greenCount < 3) continue;
+
+      greenBarCooldown.set(g.ticker, Date.now());
+      console.log(`[${etInfo.timeStr}] GREEN BARS: ${g.ticker} ${greenCount}x 5m`);
+
+      const newsUrl = await getLatestNewsUrl(g.ticker);
+      const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
+      const countLabel = greenCount >= 5 ? `${greenCount} 🔥` : `${greenCount}`;
+      const line = `\`${etInfo.timeStr}\` ↗ ${tickerLink} \`${priceFlag(g.price)}\` · ${countLabel} green bars 5m ~ 🇺🇸 | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\``;
+      await post(WH.MAIN_CHAT, { content: line });
+      await sleep(300);
+    } catch (e) {}
+  }
 }
 
 // ── BREAKING NEWS ─────────────────────────────────────────────────────────────
@@ -515,6 +617,7 @@ async function main() {
   // Poll every 60s for news, halts, filings, morning snapshot
   setInterval(async () => {
     await checkMorningSnapshot();
+    await checkGreenBars();
     await checkBreakingNews();
     await checkHalts();
     await checkSECFilings();
