@@ -199,18 +199,21 @@ async function refreshTopGappers() {
       return { ticker: t.ticker, price: lp, prev, chgPct: chg, volume: vol, prevVol, rvol, high };
     })
     .filter(t => {
-      // Exclude warrants, rights, units - tickers ending in W, R, U, WS, WT
       const sym = t.ticker;
+      // Exclude warrants, rights, units
       const isWarrant = /W$|WS$|WT$|R$|U$/.test(sym);
-      // Exclude preferred shares (ticker ending in P, A-Z after base)
+      // Exclude preferred shares
       const isPreferred = sym.length > 4 && /[A-Z]$/.test(sym) && !/^[A-Z]{1,4}$/.test(sym);
+      // Exclude OTC/Pink Sheet stocks - 5-letter tickers or ending in F (foreign OTC)
+      const isOTC = sym.length >= 5 || /F$/.test(sym);
       return (
         t.chgPct >= 5 &&
         t.price >= 0.1 &&
         t.price <= 20 &&
-        t.volume >= 100000 &&   // minimum 100K volume
+        t.volume >= 100000 &&
         !isWarrant &&
-        !isPreferred
+        !isPreferred &&
+        !isOTC
       );
     })
     .sort((a, b) => b.chgPct - a.chgPct)
@@ -246,7 +249,7 @@ async function checkNHODForTicker(ticker, price) {
 
   // Only alert once every 5 minutes per ticker
   const last = nhoodCooldown.get(ticker) || 0;
-  if (Date.now() - last < 5 * 60 * 1000) return;
+  if (Date.now() - last < 15 * 60 * 1000) return; // max 1 alert per 15 min per ticker
   nhoodCooldown.set(ticker, Date.now());
   console.log(`[${etInfo.timeStr}] ⚡ NHOD ${ticker} $${price.toFixed(2)} (${nhod}x)`);
 
