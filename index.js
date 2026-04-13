@@ -132,7 +132,7 @@ const state = {
 let topGappers = [];
 const nhoodCooldown = new Map();
 const greenBarCooldown = new Map();
-let lastFilingCheck = 0;
+
 
 // ── FETCH TOP GAPPERS ─────────────────────────────────────────────────────────
 async function refreshTopGappers() {
