@@ -518,7 +518,7 @@ async function checkHalts() {
 }
 
 // ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
-const greenBarsCooldown = new Map();
+
 
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
