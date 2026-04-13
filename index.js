@@ -289,7 +289,7 @@ async function checkNHODForTicker(ticker, price) {
 }
 
 // ── GREEN BARS SCANNER (3+ consecutive green 5m candles) ─────────────────────
-const greenBarsCooldown = new Map();
+
 
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
@@ -300,7 +300,7 @@ async function checkGreenBars() {
   for (const g of topGappers.slice(0, 20)) {
     try {
       // Cooldown: max once per 15 min per ticker
-      const last = greenBarsCooldown.get(g.ticker) || 0;
+      const last = greenBarCooldown.get(g.ticker) || 0;
       if (now - last < 15 * 60 * 1000) continue;
 
       const fromTs = Math.floor(from / 1000);
@@ -319,7 +319,7 @@ async function checkGreenBars() {
 
       if (greenCount < 3) continue;
 
-      greenBarsCooldown.set(g.ticker, now);
+      greenBarCooldown.set(g.ticker, now);
       const newsUrl = await getLatestNewsUrl(g.ticker);
       const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
       const fv = await getFinvizData(g.ticker);
@@ -337,8 +337,10 @@ async function checkGreenBars() {
   }
 }
 
-// ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
 const greenBarCooldown = new Map();
+
+// ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
+
 
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
@@ -529,7 +531,7 @@ async function checkGreenBars() {
   for (const g of topGappers.slice(0, 20)) {
     try {
       // Cooldown: max once per 15 min per ticker
-      const last = greenBarsCooldown.get(g.ticker) || 0;
+      const last = greenBarCooldown.get(g.ticker) || 0;
       if (now - last < 15 * 60 * 1000) continue;
 
       const fromTs = Math.floor(from / 1000);
@@ -548,7 +550,7 @@ async function checkGreenBars() {
 
       if (greenCount < 3) continue;
 
-      greenBarsCooldown.set(g.ticker, now);
+      greenBarCooldown.set(g.ticker, now);
       const newsUrl = await getLatestNewsUrl(g.ticker);
       const tickerLink = newsUrl ? `[${g.ticker}](<${newsUrl}>)` : `**${g.ticker}**`;
       const fv = await getFinvizData(g.ticker);
@@ -566,8 +568,9 @@ async function checkGreenBars() {
   }
 }
 
+
 // ── GREEN BARS DETECTION (5m consecutive green candles) ──────────────────────
-const greenBarCooldown = new Map();
+
 
 async function checkGreenBars() {
   if (!isActiveSession() || !topGappers.length) return;
