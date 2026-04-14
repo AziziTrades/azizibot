@@ -94,7 +94,7 @@ const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),sentGreenBar:new Map(),
   morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
-  nhodCooldown:new Map(),lastAlertedPrice:new Map()
+  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertCount:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
@@ -144,7 +144,7 @@ async function refreshTopGappers(){
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
-    topGappers=[...merge.values()].filter(t=>t.chgPct>=5&&t.price>=0.1&&t.price<=20&&!isEtf(t.ticker)).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
+    topGappers=[...merge.values()].filter(t=>t.chgPct>=5&&t.price>=0.1&&t.price<=20&&t.volume>=50000&&t.rvol>=1.5&&!isEtf(t.ticker)).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
     for(const g of topGappers){const ex=state.tickers.get(g.ticker)||{high:0,nhod:0};state.tickers.set(g.ticker,{...ex,...g,high:Math.max(g.high,ex.high)});}
     console.log(`[${getETInfo().timeStr}] ${topGappers.length} gappers`);
   }catch(e){console.error('refreshTopGappers:',e.message);}
@@ -164,7 +164,7 @@ async function fireNHOD(ticker,price){
   // 3. Significant price move from LAST ALERTED price (not just any penny new high)
   //    Prevents WGRX firing 4x in 5 min on micro-ticks
   const lastAlerted=state.lastAlertedPrice.get(ticker)||0;
-  const minMoveRequired=lastAlerted>0?lastAlerted*1.04:0; // must be 4% above last alert
+  const minMoveRequired=lastAlerted>0?lastAlerted*1.10:0; // must be 10% above last alert
   if(lastAlerted>0&&price<minMoveRequired)return;
   // ─────────────────────────────────────────────────────────────────────────
   const nhod=(s.nhod||0)+1;
@@ -172,8 +172,12 @@ async function fireNHOD(ticker,price){
 
   // FIX: 5-minute cooldown per ticker (was 10 minutes)
   const last=state.nhodCooldown.get(ticker)||0;
-  if(Date.now()-last<5*60*1000)return;
+  if(Date.now()-last<15*60*1000)return; // 15-min cooldown per ticker
   state.nhodCooldown.set(ticker,Date.now());
+  // Per-ticker session cap — max 3 alerts per ticker to prevent SNAL-style spam
+  const count=(state.alertCount.get(ticker)||0)+1;
+  if(count>3)return;
+  state.alertCount.set(ticker,count);
   state.lastAlertedPrice.set(ticker,price); // track price at alert time for significance check
 
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
