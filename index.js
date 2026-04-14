@@ -94,16 +94,27 @@ async function getRecentSplit(ticker){
   return null;
 }
 
-async function getShortInterest(ticker){
+// Yahoo Finance — SI% + Float (free, no key needed)
+async function getYahooStats(ticker){
+  const r={si:'--',float:'--'};
   try{
-    const r=await polyGet(`/v2/reference/short_interest/${ticker}`);
-    const results=(r&&r.results)||[];
-    if(results.length){
-      const pct=results[0].percent_of_float||results[0].short_percent||0;
-      if(pct>0)return `${(pct*100).toFixed(1)}%`;
+    const url=`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`;
+    const raw=await new Promise((resolve,reject)=>{
+      const req=https.get(url,{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/json'}},res=>{
+        let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
+      });
+      req.on('error',reject);req.setTimeout(5000,()=>{req.destroy();reject(new Error('timeout'));});
+    });
+    const j=JSON.parse(raw);
+    const ks=j?.quoteSummary?.result?.[0]?.defaultKeyStatistics;
+    if(ks){
+      const siPct=ks.shortPercentOfFloat?.raw||0;
+      if(siPct>0)r.si=`${(siPct*100).toFixed(1)}%`;
+      const floatShares=ks.floatShares?.raw||0;
+      if(floatShares>0)r.float=fmtN(floatShares);
     }
   }catch(e){}
-  return '--';
+  return r;
 }
 
 // ─── ETF filter ───────────────────────────────────────────────────────────────
@@ -198,12 +209,13 @@ async function fireGapperAlert(g){
     getLatestNewsUrl(g.ticker),
     getRecentSplit(g.ticker),
     getTickerDetails(g.ticker),
-    getShortInterest(g.ticker)
+    getYahooStats(g.ticker)
   ]);
 
   const mc=details.market_cap||0;
   const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-  const siStr=si!=='--'?` | SI: ${si}`:'';
+  const siStr=yahoo.si!=='--'?` | SI: ${yahoo.si}`:''
+  const floatStr=yahoo.float!=='--'?` | Float: ${yahoo.float}`:'';
   const rsStr=rs?` | ${rs}`:'';
   const sess=etInfo.sess;
   const sessLabel=sess==='PRE-MARKET'?'PM':sess==='AFTER-HOURS'?'AH':'';
@@ -214,7 +226,7 @@ async function fireGapperAlert(g){
   const cached=state.recentNewsCache.get(g.ticker);
   const prStr=cached&&(Date.now()-cached.ts)<60*60*1000?` | [PR+](<${cached.url}>)`:'';
 
-  const line=`\`${etInfo.timeStr}\` 🔥 ${tLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\`${sessLabel?' `'+sessLabel+'`':''} ~ ${flag}${mcStr} | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${siStr}${rsStr}${prStr}`;
+  const line=`\`${etInfo.timeStr}\` 🔥 ${tLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\`${sessLabel?' `'+sessLabel+'`':''} ~ ${flag}${mcStr} | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
   await post(WH.MAIN_CHAT,{content:line});
   await post(WH.TOP_GAPPERS,{content:line});
 }
@@ -284,7 +296,52 @@ async function checkHalts(){
   }
 }
 
-// ─── SEC Filings ──────────────────────────────────────────────────────────────
+// EDGAR RSS — monitors S-1, S-3, 424B filings directly from SEC source
+// Faster and more complete than Polygon's filing endpoint
+let lastEdgarCheck=0;
+const EDGAR_FORMS=['S-1','S-3','424B3','424B4','424B5'];
+async function checkEDGARFilings(){
+  if(!isActive())return;
+  if(Date.now()-lastEdgarCheck<2*60*1000)return;
+  lastEdgarCheck=Date.now();
+  const etInfo=getETInfo();
+  try{
+    for(const form of EDGAR_FORMS){
+      const xml=await new Promise((resolve,reject)=>{
+        const url=`https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=${form}&dateb=&owner=include&count=20&output=atom`;
+        const req=https.get(url,{headers:{'User-Agent':'AziziBot contact@azizibot.com','Accept':'application/xml'}},res=>{
+          let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
+        });
+        req.on('error',reject);req.setTimeout(8000,()=>{req.destroy();reject(new Error('timeout'));});
+      });
+      const entries=xml.match(/<entry>[\s\S]*?<\/entry>/g)||[];
+      for(const entry of entries){
+        const title=((entry.match(/<title>(.*?)<\/title>/)||[])[1]||'').trim();
+        const link=((entry.match(/<link[^>]*href="([^"]+)"/)||[])[1]||'').trim();
+        const updated=((entry.match(/<updated>(.*?)<\/updated>/)||[])[1]||'').trim();
+        const id=(link||title).slice(0,100);
+        if(!title||state.sentFilings.has(id))continue;
+        // Check if filed recently (within last 15 min)
+        if(updated&&(Date.now()-new Date(updated).getTime())>15*60*1000)continue;
+        // Extract ticker from title e.g. "S-1 - ACME Corp (ACME) (0001234567-24-000001)"
+        const tickerMatch=title.match(/\(([A-Z]{1,5})\)/);
+        const ticker=tickerMatch?tickerMatch[1]:'';
+        state.sentFilings.add(id);
+        const isDil=/S-3|S-1|424B/.test(form);
+        const gapper=topGappers.find(g=>g.ticker===ticker);
+        const priceStr=gapper?` | $${gapper.price.toFixed(2)} \`+${gapper.chgPct.toFixed(1)}%\``:'';
+        const line=`\`${etInfo.timeStr}\` **SEC/EDGAR**${ticker?' **'+ticker+'**':''} ${isDil?'⚠️':''} — Form ${form}${link?` — [Link](<${link}>)`:''}${priceStr}`;
+        await post(WH.SEC_FILINGS,{content:line});await sleep(300);
+        if(gapper||isDil)await post(WH.MAIN_CHAT,{content:line});
+        console.log(`[${etInfo.timeStr}] EDGAR: ${form} ${ticker}`);
+        await sleep(300);
+      }
+      await sleep(500); // be polite to SEC servers
+    }
+  }catch(e){console.error('checkEDGARFilings:',e.message);}
+}
+
+// ─── SEC Filings (Polygon backup) ──────────────────────────────────────────────────────────────
 async function checkSECFilings(){
   if(!isActive()||!topGappers.length)return;
   if(Date.now()-lastFilingCheck<2*60*1000)return;
@@ -469,6 +526,7 @@ async function main(){
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
+    await checkEDGARFilings();
     await checkSECFilings();
   },60*1000);
 
