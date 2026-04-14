@@ -489,6 +489,77 @@ async function pollNews(){
   }catch(e){console.error('pollNews:',e.message);}
 }
 
+
+// Polygon LULD/Halt WebSocket — real-time halts & resumes (included in Stocks Advanced)
+let wsHalt=null;
+function connectHaltWS(){
+  if(wsHalt){try{wsHalt.terminate();}catch(e){}}
+  console.log('Connecting to Polygon halt WebSocket...');
+  wsHalt=new WebSocket('wss://socket.polygon.io/stocks');
+  wsHalt.on('open',()=>wsHalt.send(JSON.stringify({action:'auth',params:POLY_KEY})));
+  wsHalt.on('message',data=>{
+    try{
+      for(const msg of JSON.parse(data.toString())){
+        if(msg.ev==='status'&&msg.status==='auth_success'){
+          // Subscribe to LULD events for all tickers
+          wsHalt.send(JSON.stringify({action:'subscribe',params:'LULD.*'}));
+          console.log('[Halt WS] Subscribed to LULD.*');
+        }
+        // LULD event — real-time halt/resume
+        if(msg.ev==='LULD'){
+          handleHaltEvent(msg).catch(()=>{});
+        }
+      }
+    }catch(e){}
+  });
+  wsHalt.on('error',err=>{
+    // If LULD not available on plan, fail silently — NASDAQ RSS still covers it
+    if(err.message&&err.message.includes('404')){
+      console.log('[Halt WS] LULD not available on this plan — using NASDAQ RSS fallback');
+      return;
+    }
+    console.error('Halt WS error:',err.message);
+  });
+  wsHalt.on('close',()=>{
+    console.log('Halt WS closed, reconnecting in 10s...');
+    setTimeout(connectHaltWS,10000);
+  });
+}
+
+async function handleHaltEvent(msg){
+  const etInfo=getETInfo();
+  const ticker=msg.T||msg.sym||'';
+  if(!ticker)return;
+  // msg.e = high limit, msg.f = low limit, msg.i = indicator
+  // indicator: 'D' = halt, 'U' = resume, 'A' = allowed
+  const indicator=msg.i||'';
+  const isResume=indicator==='U'||indicator==='A';
+  const isHalt=indicator==='D';
+  if(!isResume&&!isHalt)return;
+
+  const id=`luld_${ticker}_${msg.e||''}_${msg.s||Date.now()}`;
+  if(state.sentHalts.has(id))return;
+  state.sentHalts.add(id);
+
+  const gapper=topGappers.find(g=>g.ticker===ticker);
+  const priceStr=gapper?` → $${gapper.price.toFixed(2)}`:'';
+  const volStr=gapper?` ~ ${fmtN(gapper.volume)} vol`:'';
+  const newsUrl=await getLatestNewsUrl(ticker);
+  const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
+
+  if(isResume){
+    const line=`\`${etInfo.timeStr}\` ▶️ **RESUMED** ${tLink}${priceStr}${volStr}`;
+    await post(WH.MAIN_CHAT,{content:line});await sleep(300);
+    await post(WH.HALT_ALERTS,{content:line});
+    console.log(`[${etInfo.timeStr}] RESUME: ${ticker}`);
+  }else{
+    const line=`\`${etInfo.timeStr}\` ⏸️ **HALTED** ${tLink} | Volatility Pause${priceStr}${volStr}`;
+    await post(WH.MAIN_CHAT,{content:line});await sleep(300);
+    await post(WH.HALT_ALERTS,{content:line});
+    console.log(`[${etInfo.timeStr}] HALT: ${ticker}`);
+  }
+}
+
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 let ws=null;
 const subscribedTickers=new Set();
@@ -527,6 +598,7 @@ async function main(){
   await refreshEtfList();
   await refreshTopGappers();
   connectPriceWS();
+  connectHaltWS(); // Real-time halts & resumes
 
   // Fast loop every 20s — discover new hot gappers, fire once on entry
   setInterval(async()=>{
