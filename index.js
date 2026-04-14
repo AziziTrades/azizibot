@@ -342,9 +342,31 @@ async function checkMorningSnapshot(){
   console.log(`[${etInfo.timeStr}] Morning snapshot posted`);
 }
 
-// News WebSocket handler — real-time PR Spike + PR Drop (replaces FMP polling)
+// News constants — used by both REST polling and any future WS upgrade
 const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
 const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
+
+// Poll Polygon REST news every 30s — fallback since news WS requires Business plan
+let lastNewsPoll=0;
+async function pollNews(){
+  if(!isActive())return;
+  if(Date.now()-lastNewsPoll<30*1000)return;
+  lastNewsPoll=Date.now();
+  try{
+    const r=await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
+    const items=(r&&r.results)||[];
+    const cutoff=Date.now()-3*60*1000; // only process news from last 3 min
+    for(const n of items){
+      if(!n.published_utc||new Date(n.published_utc).getTime()<cutoff)continue;
+      await handleNewsEvent({
+        title:n.title,
+        tickers:n.tickers||[],
+        article_url:n.article_url||'',
+        published_utc:n.published_utc
+      });
+    }
+  }catch(e){console.error('pollNews:',e.message);}
+}
 
 async function handleNewsEvent(n){
   if(!isActive())return;
@@ -401,7 +423,6 @@ async function handleNewsEvent(n){
 }
 
 let ws=null;
-let wsNews=null;
 const subscribedTickers=new Set();
 
 function connectPriceWS(){
@@ -438,25 +459,6 @@ function connectPriceWS(){
   ws.on('close',()=>{console.log('Price WS closed, reconnecting in 5s...');setTimeout(connectPriceWS,5000);});
 }
 
-function connectNewsWS(){
-  if(wsNews){try{wsNews.terminate();}catch(e){}}
-  console.log('Connecting to Polygon news WebSocket...');
-  wsNews=new WebSocket('wss://socket.polygon.io/news');
-  wsNews.on('open',()=>wsNews.send(JSON.stringify({action:'auth',params:POLY_KEY})));
-  wsNews.on('message',data=>{
-    try{
-      for(const msg of JSON.parse(data.toString())){
-        if(msg.ev==='status'&&msg.status==='auth_success'){
-          wsNews.send(JSON.stringify({action:'subscribe',params:'N.*'}));
-          console.log('[News WS] Subscribed to all news (N.*)');
-        }
-        if(msg.ev==='N')handleNewsEvent(msg).catch(()=>{});
-      }
-    }catch(e){}
-  });
-  wsNews.on('error',err=>console.error('News WS error:',err.message));
-  wsNews.on('close',()=>{console.log('News WS closed, reconnecting in 5s...');setTimeout(connectNewsWS,5000);});
-}
 
 function subscribeNewTickers(newTickers){
   if(!ws||ws.readyState!==WebSocket.OPEN||!newTickers.length)return;
@@ -478,7 +480,6 @@ async function main(){
   await refreshEtfList();
   await refreshTopGappers();
   connectPriceWS();
-  connectNewsWS();
 
   setInterval(async()=>{
     const before=new Set(topGappers.map(g=>g.ticker));
@@ -487,6 +488,7 @@ async function main(){
     const newlyDiscovered=topGappers.filter(g=>!before.has(g.ticker));
     const unsubbed=newlyDiscovered.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
     if(unsubbed.length)subscribeNewTickers(unsubbed);
+    await pollNews();
     for(const g of newlyDiscovered){
       const s=state.tickers.get(g.ticker);
       if(s&&g.price>=s.high*0.999)fireNHOD(g.ticker,g.price).catch(()=>{});
@@ -496,6 +498,7 @@ async function main(){
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
+    await pollNews();
     await checkGreenBars();
     await checkSECFilings();
   },60*1000);
