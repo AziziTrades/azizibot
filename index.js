@@ -94,37 +94,50 @@ async function getRecentSplit(ticker){
   return null;
 }
 
-// Yahoo Finance — SI% + Float (free, no key needed)
+// Float + SI% — Finviz free scraper with Polygon fallback
 async function getYahooStats(ticker){
   const r={si:'--',float:'--'};
   try{
-    // Finviz free page — no API key needed, has float + SI% for all tickers
     const html=await new Promise((resolve,reject)=>{
       const req=https.get(`https://finviz.com/quote.ashx?t=${ticker}`,{
         headers:{
           'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept':'text/html,application/xhtml+xml',
-          'Accept-Language':'en-US,en;q=0.9',
-          'Referer':'https://finviz.com/'
+          'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language':'en-US,en;q=0.5',
+          'Connection':'keep-alive'
         }
       },res=>{
+        if(res.statusCode===302||res.statusCode===301){resolve('');return;}
         let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
       });
-      req.on('error',reject);req.setTimeout(6000,()=>{req.destroy();reject(new Error('timeout'));});
+      req.on('error',()=>resolve(''));
+      req.setTimeout(5000,()=>{req.destroy();resolve('');});
     });
-    // Finviz wraps labels in <b> tags inside <td>
-    // Pattern: <b>Shs Float</b></td><td ...>VALUE</td>
-    const floatM=html.match(/Shs Float<\/b><\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||
-                 html.match(/Shs\s+Float[^<]*<\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||
-                 html.match(/Shs Float[^<]*>([\d.]+[MBK])</i);
-    if(floatM)r.float=floatM[1].trim();
-
-    const siM=html.match(/Short Float[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||
-              html.match(/Short Float[^<]*>([\d.]+%)/i);
-    if(siM)r.si=siM[1].includes('%')?siM[1].trim():siM[1].trim()+'%';
-    // Debug: log if still missing data
-    if(r.float==='--'||r.si==='--')console.log(`[Finviz] ${ticker} partial: float=${r.float} si=${r.si} html_len=${html.length}`);
+    if(html.length>1000){
+      const fPatterns=[
+        /Shs Float<\/b><\/td>\s*<td[^>]*>([\d.]+[MBK]?)<\/td>/i,
+        /Shs Float[^<]*<\/td>[^<]*<td[^>]*>([\d.]+[MBK]?)<\/td>/i,
+        />Shs Float<[^>]+>([\d.]+[MBK])/i,
+      ];
+      for(const p of fPatterns){const m=html.match(p);if(m&&m[1]&&m[1]!=='-'){r.float=m[1].trim();break;}}
+      const sPatterns=[
+        /Short Float<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i,
+        /Short Float[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i,
+        />Short Float<[^>]+>([\d.]+%)/i,
+      ];
+      for(const p of sPatterns){const m=html.match(p);if(m&&m[1]&&m[1]!=='-'){r.si=m[1].includes('%')?m[1].trim():m[1].trim()+'%';break;}}
+    }
+    console.log(`[Finviz] ${ticker}: len=${html.length} float=${r.float} si=${r.si}`);
   }catch(e){console.error(`[Finviz] ${ticker}:`,e.message);}
+  // Fallback: Polygon shares outstanding
+  if(r.float==='--'){
+    try{
+      const d=tickerCache.get(ticker);
+      const det=d?d.data:await polyGet(`/v3/reference/tickers/${ticker}`).then(r=>r&&r.results||{});
+      const shares=det.share_class_shares_outstanding||det.weighted_shares_outstanding||0;
+      if(shares>0)r.float=fmtN(shares)+' (out)';
+    }catch(e){}
+  }
   return r;
 }
 
@@ -250,13 +263,18 @@ async function refreshTopGappers(){
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
+    // Relax thresholds for pre-market and after-hours (lower natural volume)
+    const {sess:curSess}=getETInfo();
+    const isExtended=curSess==='PRE-MARKET'||curSess==='AFTER-HOURS';
+    const volThresh=isExtended?25000:MIN_VOL;
+    const rvolThresh=isExtended?2:MIN_RVOL;
     topGappers=[...merge.values()]
       .filter(t=>
         t.chgPct>=MIN_CHG &&
         t.price>=MIN_PRICE &&
         t.price<=MAX_PRICE &&
-        t.volume>=MIN_VOL &&
-        t.rvol>=MIN_RVOL &&
+        t.volume>=volThresh &&
+        t.rvol>=rvolThresh &&
         !isEtf(t.ticker) &&
         !t.isOTC
       )
@@ -268,8 +286,11 @@ async function refreshTopGappers(){
 
 // ─── Hot Gapper Discovery Alert — fires ONCE per ticker per session ───────────
 async function fireGapperAlert(g){
-  if(state.alertedGappers.has(g.ticker))return;
-  state.alertedGappers.add(g.ticker);
+  // Allow one alert per ticker per market session (PM, MARKET, AH separately)
+  const etInfo0=getETInfo();
+  const sessionKey=`${g.ticker}_${etInfo0.sess}`;
+  if(state.alertedGappers.has(sessionKey))return;
+  state.alertedGappers.add(sessionKey);
   state.recentMovers.add(g.ticker);
   const etInfo=getETInfo();
   console.log(`[${etInfo.timeStr}] HOT GAPPER: ${g.ticker} +${g.chgPct.toFixed(1)}% RVol:${fmtRVol(g.rvol)}`);
@@ -963,6 +984,10 @@ async function main(){
 
   // Slow loop every 60s — halts, SEC filings, morning snapshot
   setInterval(async()=>{
+    // Reset alertedGappers at each new market session
+    const {sess:s0}=getETInfo();
+    if(!state._lastSess)state._lastSess=s0;
+    if(state._lastSess!==s0){state.alertedGappers.clear();state._lastSess=s0;console.log(`[Session] New session: ${s0} — alertedGappers reset`);}
     await checkMorningSnapshot();
     await checkHalts();
     await checkEDGARFilings();
