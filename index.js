@@ -93,7 +93,9 @@ async function getRecentSplit(ticker){
 const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentGreenBar:new Map(),
-  morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),nhoodCooldown:new Map()
+  morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
+  // FIX: renamed nhoodCooldown → nhodCooldown (typo fix)
+  nhodCooldown:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
@@ -129,9 +131,12 @@ async function fireNHOD(ticker,price){
   const s=state.tickers.get(ticker);if(!s||price<=s.high+0.001)return;
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod});
-  const last=state.nhoodCooldown.get(ticker)||0;
-  if(Date.now()-last<10*60*1000)return;
-  state.nhoodCooldown.set(ticker,Date.now());
+
+  // FIX: 5-minute cooldown per ticker (was 10 minutes)
+  const last=state.nhodCooldown.get(ticker)||0;
+  if(Date.now()-last<5*60*1000)return;
+  state.nhodCooldown.set(ticker,Date.now());
+
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
   const[fv,newsUrl,rs,prof]=await Promise.all([getFinvizData(ticker),getLatestNewsUrl(ticker),getRecentSplit(ticker),getProfile(ticker)]);
   const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
