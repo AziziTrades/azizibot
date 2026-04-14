@@ -94,7 +94,7 @@ const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),sentGreenBar:new Map(),
   morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
-  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertCount:new Map()
+  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertWindow:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
@@ -174,10 +174,13 @@ async function fireNHOD(ticker,price){
   const last=state.nhodCooldown.get(ticker)||0;
   if(Date.now()-last<15*60*1000)return; // 15-min cooldown per ticker
   state.nhodCooldown.set(ticker,Date.now());
-  // Per-ticker session cap — max 3 alerts per ticker to prevent SNAL-style spam
-  const count=(state.alertCount.get(ticker)||0)+1;
-  if(count>3)return;
-  state.alertCount.set(ticker,count);
+  // Max 3 alerts per ticker per 15-minute window — resets after window expires
+  const now15=Date.now();
+  const window15=15*60*1000;
+  const times=(state.alertWindow.get(ticker)||[]).filter(t=>now15-t<window15);
+  if(times.length>=3)return;
+  times.push(now15);
+  state.alertWindow.set(ticker,times);
   state.lastAlertedPrice.set(ticker,price); // track price at alert time for significance check
 
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
