@@ -158,52 +158,6 @@ async function getRecentSplit(ticker){
   return null;
 }
 
-// Yahoo Finance — SI% + Float (free, no key needed)
-async function getYahooStats(ticker){
-  const r={si:'--',float:'--'};
-  try{
-    // Try both modules for better coverage across all tickers
-    const url=`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics%2CsummaryDetail`;
-    const raw=await new Promise((resolve,reject)=>{
-      const req=https.get(url,{
-        headers:{
-          'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept':'application/json',
-          'Accept-Language':'en-US,en;q=0.9'
-        }
-      },res=>{
-        let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
-      });
-      req.on('error',reject);req.setTimeout(6000,()=>{req.destroy();reject(new Error('timeout'));});
-    });
-    const j=JSON.parse(raw);
-    const result=j?.quoteSummary?.result?.[0];
-    const ks=result?.defaultKeyStatistics||{};
-    const sd=result?.summaryDetail||{};
-
-    // Float — try multiple field paths
-    const floatShares=
-      ks.floatShares?.raw||
-      ks.impliedSharesOutstanding?.raw||
-      sd.floatShares?.raw||0;
-    if(floatShares>0)r.float=fmtN(floatShares);
-
-    // Short interest — try multiple fields
-    const siPct=
-      ks.shortPercentOfFloat?.raw||
-      ks.shortPercentOfFloatShares?.raw||0;
-    const siShares=ks.sharesShort?.raw||0;
-    const sharesOut=ks.sharesOutstanding?.raw||floatShares||0;
-    if(siPct>0){
-      r.si=`${(siPct*100).toFixed(1)}%`;
-    }else if(siShares>0&&sharesOut>0){
-      // Calculate SI% from raw shares if percent not available
-      r.si=`${((siShares/sharesOut)*100).toFixed(1)}%`;
-    }
-  }catch(e){console.error(`[Yahoo] ${ticker}:`,e.message);}
-  return r;
-}
-
 // SEC EDGAR — resolve ticker from CIK (free, no key)
 // EDGAR link URLs contain /data/{CIK}/ which maps to ticker via data.sec.gov
 const cikTickerCache=new Map();
@@ -755,7 +709,9 @@ async function buildTickerEmbed(ticker){
 
   // News headlines
   const news=(newsItems&&newsItems.results)||[];
-  const newsStr=news.slice(0,5).map(n=>`• [${(n.title||'').slice(0,80)}](<${n.article_url||''}>)`).join('\n')||'No recent news';
+  const cutoffEmbed=Date.now()-30*24*60*60*1000;
+  const recentNews=news.filter(n=>n.published_utc&&new Date(n.published_utc).getTime()>cutoffEmbed);
+  const newsStr=recentNews.slice(0,5).map(n=>{const ageMs=Date.now()-new Date(n.published_utc).getTime();const ageMin=Math.round(ageMs/60000);const ageStr=ageMin<60?`${ageMin}m ago`:ageMin<1440?`${Math.floor(ageMin/60)}h ago`:`${Math.floor(ageMin/1440)}d ago`;return `• [${(n.title||'').slice(0,80)}](<${n.article_url||''}>) — *${ageStr}*`;}).join('\n')||'No recent news (30 days)';
 
   const fields=[
     {name:'Price',value:`$${price.toFixed(4)}  ${arrow} \`${chgPct>=0?'+':''}${chgPct.toFixed(2)}%\``,inline:true},
@@ -794,15 +750,20 @@ async function cmdGappers(){
 
 async function cmdNews(ticker){
   ticker=ticker.toUpperCase().trim();
-  const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=8&order=desc&sort=published_utc`);
+  const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=20&order=desc&sort=published_utc`);
   const items=(r&&r.results)||[];
-  if(!items.length)return{content:`No recent news for **${ticker}**`};
-  const rows=items.map(n=>{
-    const age=Math.round((Date.now()-new Date(n.published_utc).getTime())/60000);
-    const ageStr=age<60?`${age}m ago`:`${Math.floor(age/60)}h ago`;
+  if(!items.length)return{content:`No news found for **${ticker}**`};
+  // Only show articles from last 30 days
+  const cutoff=Date.now()-30*24*60*60*1000;
+  const recent=items.filter(n=>n.published_utc&&new Date(n.published_utc).getTime()>cutoff).slice(0,8);
+  if(!recent.length)return{content:`No recent news for **${ticker}** in the last 30 days.`};
+  const rows=recent.map(n=>{
+    const ageMs=Date.now()-new Date(n.published_utc).getTime();
+    const ageMin=Math.round(ageMs/60000);
+    const ageStr=ageMin<60?`${ageMin}m ago`:ageMin<1440?`${Math.floor(ageMin/60)}h ago`:`${Math.floor(ageMin/1440)}d ago`;
     return `• [${(n.title||'').slice(0,90)}](<${n.article_url||''}>) — *${ageStr}*`;
   }).join('\n');
-  return{embeds:[{title:`📰 ${ticker} — Latest News`,description:rows,color:0x5865f2,footer:{text:`AziziBot · ${getETInfo().timeStr} ET`}}]};
+  return{embeds:[{title:`📰 ${ticker} — Latest News`,description:rows,color:0x5865f2,footer:{text:`AziziBot · Polygon.io · ${getETInfo().timeStr} ET`}}]};
 }
 
 async function cmdSI(ticker){
@@ -814,7 +775,7 @@ async function cmdSI(ticker){
     {name:'Float',value:yahoo.float!=='--'?yahoo.float:'--',inline:true},
     {name:'Market Cap',value:mc>0?fmtN(mc):'--',inline:true},
   ];
-  return{embeds:[{title:`📊 ${ticker} — Short Interest & Float`,color:0xf0a500,fields,footer:{text:`AziziBot · Yahoo Finance · ${getETInfo().timeStr} ET`}}]};
+  return{embeds:[{title:`📊 ${ticker} — Short Interest & Float`,color:0xf0a500,fields,footer:{text:`AziziBot · Finviz · ${getETInfo().timeStr} ET`}}]};
 }
 
 async function cmdHalts(){
