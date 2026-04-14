@@ -117,6 +117,22 @@ async function getYahooStats(ticker){
   return r;
 }
 
+// SEC EDGAR — resolve ticker from CIK (free, no key)
+// EDGAR link URLs contain /data/{CIK}/ which maps to ticker via data.sec.gov
+const cikTickerCache=new Map();
+async function getTickerFromCIK(cik){
+  if(!cik)return'';
+  if(cikTickerCache.has(cik))return cikTickerCache.get(cik);
+  try{
+    const padded=String(cik).padStart(10,'0');
+    const r=await jsonGet(`https://data.sec.gov/submissions/CIK${padded}.json`);
+    const ticker=(r&&r.tickers&&r.tickers[0])||'';
+    if(ticker)cikTickerCache.set(cik,ticker);
+    return ticker;
+  }catch(e){return'';}
+}
+
+
 // ─── ETF filter ───────────────────────────────────────────────────────────────
 let etfSet=new Set();
 let lastEtfRefresh=0;
@@ -323,9 +339,11 @@ async function checkEDGARFilings(){
         if(!title||state.sentFilings.has(id))continue;
         // Check if filed recently (within last 15 min)
         if(updated&&(Date.now()-new Date(updated).getTime())>15*60*1000)continue;
-        // Extract ticker from title e.g. "S-1 - ACME Corp (ACME) (0001234567-24-000001)"
-        const tickerMatch=title.match(/\(([A-Z]{1,5})\)/);
-        const ticker=tickerMatch?tickerMatch[1]:'';
+        // Extract CIK from link URL: /Archives/edgar/data/{CIK}/
+        // Then resolve to ticker via SEC's free company API
+        const cikMatch=link.match(/\/data\/(\d+)\//);
+        const cik=cikMatch?cikMatch[1]:'';
+        const ticker=cik?await getTickerFromCIK(cik):'';
         state.sentFilings.add(id);
         const isDil=/S-3|S-1|424B/.test(form);
         const gapper=topGappers.find(g=>g.ticker===ticker);
