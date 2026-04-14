@@ -244,7 +244,6 @@ async function fireGapperAlert(g){
 
   const line=`\`${etInfo.timeStr}\` 🔥 ${tLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\`${sessLabel?' `'+sessLabel+'`':''} ~ ${flag}${mcStr} | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
   await post(WH.MAIN_CHAT,{content:line});
-  await post(WH.TOP_GAPPERS,{content:line});
 }
 
 // ─── Halts ────────────────────────────────────────────────────────────────────
@@ -315,7 +314,7 @@ async function checkHalts(){
 // EDGAR RSS — monitors S-1, S-3, 424B filings directly from SEC source
 // Faster and more complete than Polygon's filing endpoint
 let lastEdgarCheck=0;
-const EDGAR_FORMS=['S-1','S-3','424B3','424B4','424B5'];
+const EDGAR_FORMS=['8-K','8-K/A','S-1','S-3','424B3','424B4','424B5'];
 async function checkEDGARFilings(){
   if(!isActive())return;
   if(Date.now()-lastEdgarCheck<2*60*1000)return;
@@ -344,8 +343,10 @@ async function checkEDGARFilings(){
         const cikMatch=link.match(/\/data\/(\d+)\//);
         const cik=cikMatch?cikMatch[1]:'';
         const ticker=cik?await getTickerFromCIK(cik):'';
-        // Only alert if ticker is a current hot gapper OR was alerted today as a runner
-        const isHot=ticker&&(topGappers.some(g=>g.ticker===ticker)||state.alertedGappers.has(ticker));
+        // 8-K: always alert if we have a ticker (can be catalyst BEFORE it gaps)
+        // All other forms: only alert for current hot gappers or today's runners
+        const is8K=/^8-K/.test(form);
+        const isHot=ticker&&(is8K||topGappers.some(g=>g.ticker===ticker)||state.alertedGappers.has(ticker));
         if(!isHot){state.sentFilings.add(id);continue;}
         state.sentFilings.add(id);
         const isDil=/S-3|S-1|424B/.test(form);
