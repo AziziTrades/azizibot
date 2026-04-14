@@ -320,34 +320,44 @@ async function checkPRDrop(){
 }
 
 async function checkPRSpike(){
-  if(!isActive()||!topGappers.length)return;
+  if(!isActive())return;
   const etInfo=getETInfo();
-  const tickers=topGappers.map(g=>g.ticker).join(',');
+  // Scan broad latest news — NOT just topGappers — so we catch GLMD-style
+  // catalysts the moment they publish, before the price even moves
+  const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
   try{
-    const news=await fmpGet(`/stable/news/stock?symbols=${tickers}&limit=50`);
+    const news=await fmpGet('/stable/news/stock?limit=100');
     if(!Array.isArray(news))return;
-    const cutoff=Date.now()-10*60*1000;
+    const cutoff=Date.now()-5*60*1000; // within last 5 minutes for speed
     for(const n of news){
       if(!n.publishedDate||new Date(n.publishedDate).getTime()<cutoff)continue;
-      const ticker=n.symbol||n.symbols||'';if(!ticker)continue;
-      const id=`prspike_${(n.url||n.title||'').slice(0,80)}`;
+      const title=n.title||'';
+      if(!SPIKE_RE.test(title))continue; // must have positive catalyst keywords
+      const ticker=(n.symbol||n.symbols||'').toUpperCase().split(',')[0].trim();
+      if(!ticker||isEtf(ticker))continue;
+      const id=`prspike_${(n.url||title).slice(0,80)}`;
       if(state.sentPRSpike.has(id))continue;
-      const gapper=topGappers.find(g=>g.ticker===ticker);
-      if(!gapper||gapper.chgPct<10)continue;
       state.sentPRSpike.add(id);
-      const prof=await getProfile(ticker);
+      // Fetch snapshot for current price + profile for IO/MC
+      const [snap,prof]=await Promise.all([
+        polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+        getProfile(ticker)
+      ]);
+      const td=snap&&snap.ticker;
+      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
       const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
       const mc=prof.mktCap||prof.marketCap||0;
       const ioStr=io>0?` | IO: ${(io<1?io*100:io).toFixed(2)}%`:'';
       const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-      const title=(n.title||'').slice(0,200);
-      const link=n.url?` - [Link](<${n.url}>)`:'';
+      const pStr=price>0?` \`${priceFlag(price)}\``:'';
       const flag=countryFlag(ticker);
-      const line=`**${ticker}** \`${priceFlag(gapper.price)}\` - ${title}${link} ~ ${flag}${ioStr}${mcStr}`;
-      await post(WH.PRESS_RELEASES,{content:line});await sleep(300);
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📰 ${line}`});await sleep(300);
+      const link=n.url?` - [Link](<${n.url}>)`:'';
+      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${flag}${ioStr}${mcStr}`;
+      await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
+      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
       console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
     }
+    if(state.sentPRSpike.size>500){const a=[...state.sentPRSpike];state.sentPRSpike.clear();a.slice(-200).forEach(id=>state.sentPRSpike.add(id));}
   }catch(e){console.error('checkPRSpike:',e.message);}
 }
 
