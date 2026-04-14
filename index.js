@@ -254,6 +254,9 @@ async function fireNHOD(ticker,price){
   const s=state.tickers.get(ticker);
   if(!s||price<=s.high+0.001)return;
 
+  // Debug log every NHOD candidate so we can see why things get blocked
+  console.log(`[NHOD?] ${ticker} $${price.toFixed(4)} chg:${gapper.chgPct.toFixed(1)}% vol:${fmtN(gapper.volume)} rvol:${fmtRVol(gapper.rvol)} lastAlert:${s.lastAlertPrice?'$'+s.lastAlertPrice.toFixed(4):'none'} cooldown:${s.lastAlertTime?Math.round((Date.now()-s.lastAlertTime)/60000)+'m ago':'none'}`);
+
   // ── Session-based quality gates ─────────────────────────────────────────
   const{etMin}=getETInfo();
   // 4:00AM–6:00AM ET  (etMin 240–360): early pre-market
