@@ -92,7 +92,7 @@ async function getRecentSplit(ticker){
 
 const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
-  sentFilings:new Set(),sentPRSpike:new Set(),sentGreenBar:new Map(),
+  sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),sentGreenBar:new Map(),
   morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
   nhodCooldown:new Map()
 };
@@ -261,6 +261,53 @@ async function checkHalts(){
   }
 }
 
+async function checkPRDrop(){
+  if(!isActive())return;
+  const etInfo=getETInfo();
+  // Dilutive / negative PR keywords — same logic NuntioBot uses for PR ↓ DROP
+  const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
+  try{
+    // Scan broad latest news — not just topGappers — so we catch tickers like TE fast
+    const news=await fmpGet('/stable/news/stock?limit=100');
+    if(!Array.isArray(news))return;
+    const cutoff=Date.now()-5*60*1000; // only fire on news within last 5 min
+    for(const n of news){
+      if(!n.publishedDate||new Date(n.publishedDate).getTime()<cutoff)continue;
+      const title=n.title||'';
+      if(!DROP_RE.test(title))continue;
+      const ticker=(n.symbol||n.symbols||'').toUpperCase().split(',')[0].trim();
+      if(!ticker||isEtf(ticker))continue;
+      const id=`prdrop_${(n.url||title).slice(0,100)}`;
+      if(state.sentPRDrop.has(id))continue;
+      state.sentPRDrop.add(id);
+      // Fetch snapshot for price, profile for IO/MC/SI
+      const [snap,prof,fv]=await Promise.all([
+        polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+        getProfile(ticker),
+        getFinvizData(ticker)
+      ]);
+      const td=snap&&snap.ticker;
+      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+      const pFlag=price>0?priceFlag(price):'';
+      const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
+      const mc=prof.mktCap||prof.marketCap||0;
+      const ioStr=io>0?` | IO: ${(io<1?io*100:io).toFixed(2)}%`:'';
+      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+      const siStr=fv.si!=='--'?` | SI: ${fv.si}`:'';
+      const flag=countryFlag(ticker);
+      const link=n.url?` - [Link](<${n.url}>)`:'';
+      const priceStr=price>0?` \`${pFlag}\``:'';
+      const line=`**${ticker}**${priceStr} - ${title.slice(0,200)}${link} ~ ${flag}${ioStr}${mcStr}${siStr}`;
+      await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});
+      await sleep(300);
+      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});
+      await sleep(300);
+      console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker} — ${title.slice(0,60)}`);
+    }
+    if(state.sentPRDrop.size>500){const a=[...state.sentPRDrop];state.sentPRDrop.clear();a.slice(-200).forEach(id=>state.sentPRDrop.add(id));}
+  }catch(e){console.error('checkPRDrop:',e.message);}
+}
+
 async function checkPRSpike(){
   if(!isActive()||!topGappers.length)return;
   const etInfo=getETInfo();
@@ -402,8 +449,9 @@ function connectWebSocket(){
     try{
       for(const msg of JSON.parse(data.toString())){
         if(msg.ev==='status'&&msg.status==='auth_success'){
+          subscribedTickers.clear();
           const subs=topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
-          if(subs)ws.send(JSON.stringify({action:'subscribe',params:subs}));
+          if(subs){ws.send(JSON.stringify({action:'subscribe',params:subs}));topGappers.forEach(g=>subscribedTickers.add(g.ticker));}
           console.log(`WebSocket subscribed to ${topGappers.length} tickers`);
         }
         if(msg.ev==='T'||msg.ev==='A'){
@@ -425,10 +473,21 @@ function connectWebSocket(){
   ws.on('error',err=>console.error('WS error:',err.message));
   ws.on('close',()=>{console.log('WS closed, reconnecting in 5s...');setTimeout(connectWebSocket,5000);});
 }
+// Track which tickers are currently subscribed so we can instantly sub new ones
+const subscribedTickers=new Set();
+
+function subscribeNewTickers(newTickers){
+  if(!ws||ws.readyState!==WebSocket.OPEN||!newTickers.length)return;
+  ws.send(JSON.stringify({action:'subscribe',params:newTickers.map(t=>`T.${t},A.${t}`).join(',')}));
+  newTickers.forEach(t=>subscribedTickers.add(t));
+  console.log(`[WS] Subscribed to ${newTickers.length} new tickers: ${newTickers.join(', ')}`);
+}
+
 function resubscribeWS(){
   if(ws&&ws.readyState===WebSocket.OPEN&&topGappers.length){
     const subs=topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
     ws.send(JSON.stringify({action:'subscribe',params:subs}));
+    topGappers.forEach(g=>subscribedTickers.add(g.ticker));
   }
 }
 
@@ -437,10 +496,32 @@ async function main(){
   await refreshEtfList();
   await refreshTopGappers();
   connectWebSocket();
-  setInterval(async()=>{await refreshEtfList();await refreshTopGappers();resubscribeWS();},60*1000);
+
+  // Fast loop: refresh gappers every 20s, instantly sub new tickers & fire PMH on discovery
+  setInterval(async()=>{
+    const before=new Set(topGappers.map(g=>g.ticker));
+    await refreshEtfList();
+    await refreshTopGappers();
+
+    // Find brand-new tickers that just appeared in topGappers
+    const newlyDiscovered=topGappers.filter(g=>!before.has(g.ticker));
+
+    // Instantly subscribe new tickers to WebSocket — don't wait for next cycle
+    const unsubbed=newlyDiscovered.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
+    if(unsubbed.length)subscribeNewTickers(unsubbed);
+
+    // Fire PMH immediately for newly discovered tickers at their current high
+    // This catches WGRX-style gappers that we missed before subscribing
+    for(const g of newlyDiscovered){
+      const s=state.tickers.get(g.ticker);
+      if(s&&g.price>=s.high*0.999)fireNHOD(g.ticker,g.price).catch(()=>{});
+    }
+  },20*1000);
+
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
+    await checkPRDrop();
     await checkPRSpike();
     await checkBreakingNews();
     await checkGreenBars();
