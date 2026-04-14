@@ -493,6 +493,59 @@ async function checkMorningSnapshot(){
 const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
 const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
 
+
+// ─── After-hours & Pre-market scanner ────────────────────────────────────────
+// Polygon gainers endpoint goes stale after close.
+// This directly checks known tickers for AH/PM moves every 60s.
+let lastAHScan=0;
+async function scanExtendedHours(){
+  const {sess,etMin}=getETInfo();
+  if(sess!=='AFTER-HOURS'&&sess!=='PRE-MARKET')return;
+  if(Date.now()-lastAHScan<60*1000)return;
+  lastAHScan=Date.now();
+
+  // Candidates: today's runners + snapshot top movers
+  const cleanCandidates=new Set();
+  for(const k of [...state.alertedGappers,...state.recentMovers]){
+    const t=k.includes('_')?k.split('_')[0]:k;
+    if(t&&/^[A-Z]{1,4}$/.test(t))cleanCandidates.add(t);
+  }
+  topGappers.forEach(g=>cleanCandidates.add(g.ticker));
+
+  try{
+    const snap=await polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=50');
+    for(const t of((snap&&snap.tickers)||[])){
+      if(t.ticker&&/^[A-Z]{1,4}$/.test(t.ticker)&&!isEtf(t.ticker))cleanCandidates.add(t.ticker);
+    }
+  }catch(e){}
+
+  const minutesActive=Math.max(etMin-240,1);
+  const timeScale=Math.min(780/minutesActive,30);
+
+  for(const ticker of cleanCandidates){
+    try{
+      const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+      const td=snap&&snap.ticker;if(!td)continue;
+      const price=(td.lastTrade&&td.lastTrade.p)||0;
+      const lastTs=(td.lastTrade&&td.lastTrade.t)||0;
+      const prev=(td.prevDay&&td.prevDay.c)||0;
+      if(!price||!prev)continue;
+      if((Date.now()-lastTs)/60000>30)continue; // trade must be within last 30 min
+      const chgPct=((price-prev)/prev)*100;
+      if(Math.abs(chgPct)<5)continue;
+      const vol=(td.day&&td.day.v)||0;
+      const pv2=(td.prevDay&&td.prevDay.v)||0;
+      const rvol=pv2>0?(vol*timeScale)/pv2:0;
+      if(price>MAX_PRICE||price<MIN_PRICE)continue;
+      const g={ticker,price,prev,chgPct,volume:vol,prevVol:pv2,rvol,high:price};
+      await fireGapperAlert(g);
+      await sleep(500);
+    }catch(e){}
+    await sleep(100);
+  }
+  console.log(`[AH Scan] checked ${cleanCandidates.size} tickers`);
+}
+
 async function pollNews(){
   if(!isActive())return;
   if(Date.now()-lastNewsPoll<30*1000)return;
@@ -980,6 +1033,8 @@ async function main(){
 
     // Poll news every 30s
     await pollNews();
+    // AH/PM scanner
+    await scanExtendedHours();
   },20*1000);
 
   // Slow loop every 60s — halts, SEC filings, morning snapshot
