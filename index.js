@@ -94,12 +94,33 @@ const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentGreenBar:new Map(),
   morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
-  // FIX: renamed nhoodCooldown → nhodCooldown (typo fix)
   nhodCooldown:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
 let lastHaltCheck=0;
+
+// ETF filter — loaded once at startup, refreshed every 6 hours
+let etfSet=new Set();
+let lastEtfRefresh=0;
+async function refreshEtfList(){
+  if(Date.now()-lastEtfRefresh<6*60*60*1000)return;
+  try{
+    const list=await fmpGet('/stable/etf/list');
+    if(Array.isArray(list)&&list.length){
+      etfSet=new Set(list.map(e=>e.symbol||e.ticker||'').filter(Boolean));
+      lastEtfRefresh=Date.now();
+      console.log(`[ETF] Loaded ${etfSet.size} ETF tickers`);
+    }
+  }catch(e){console.error('refreshEtfList:',e.message);}
+}
+function isEtf(ticker){
+  // Primary: FMP list lookup
+  if(etfSet.has(ticker))return true;
+  // Fallback: common ETF ticker patterns (3-4 letters ending in common suffixes)
+  if(/^(SPY|QQQ|IWM|DIA|GLD|SLV|TLT|HYG|LQD|EEM|VXX|UVXY|SQQQ|TQQQ|SPXU|SPXL|LABD|LABU|NUGT|DUST|JNUG|JDST|NAIL|FAS|FAZ|TNA|TZA|UPRO|SDOW|UDOW|SOXL|SOXS|TECL|TECS|DFEN|WEBL|WEBS|FNGU|FNGG|HIBL|HIBS|DPST|DRN|DRV|MIDU|MIDZ|SMLL|BNKU|BNKD|CURE|SICK|WANT|OILU|OILD|GUSH|DRIP|ERX|ERY|KOLD|UGAZ|DGAZ|BOIL|KORU|YINN|YANG|EDC|EDZ|EET|EEV|EWJ|EWZ|XLF|XLE|XLK|XLV|XLI|XLP|XLU|XLB|XLY|XLRE|VTI|VOO|VEA|VWO|BND|AGG|EMB|BNDX|IEMG|ITOT|IEFA|IJR|IJH|IVV|GDX|GDXJ|SIL|SILJ|REMX|LIT|ARKK|ARKG|ARKW|ARKF|ARKX|PRNT|IZRL)$/.test(ticker))return true;
+  return false;
+}
 
 async function refreshTopGappers(){
   try{
@@ -118,7 +139,7 @@ async function refreshTopGappers(){
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
-    topGappers=[...merge.values()].filter(t=>t.chgPct>=5&&t.price>=0.1&&t.price<=20).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
+    topGappers=[...merge.values()].filter(t=>t.chgPct>=5&&t.price>=0.1&&t.price<=20&&!isEtf(t.ticker)).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
     for(const g of topGappers){const ex=state.tickers.get(g.ticker)||{high:0,nhod:0};state.tickers.set(g.ticker,{...ex,...g,high:Math.max(g.high,ex.high)});}
     console.log(`[${getETInfo().timeStr}] ${topGappers.length} gappers`);
   }catch(e){console.error('refreshTopGappers:',e.message);}
@@ -406,9 +427,10 @@ function resubscribeWS(){
 
 async function main(){
   console.log('🤖 AziziBot v3 starting...');
+  await refreshEtfList();
   await refreshTopGappers();
   connectWebSocket();
-  setInterval(async()=>{await refreshTopGappers();resubscribeWS();},60*1000);
+  setInterval(async()=>{await refreshEtfList();await refreshTopGappers();resubscribeWS();},60*1000);
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
