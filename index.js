@@ -94,7 +94,7 @@ const state={
   tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),sentGreenBar:new Map(),
   morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
-  nhodCooldown:new Map()
+  nhodCooldown:new Map(),lastAlertedPrice:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
@@ -155,8 +155,18 @@ async function fireNHOD(ticker,price){
   const etInfo=getETInfo();
   const gapper=topGappers.find(g=>g.ticker===ticker);if(!gapper)return;
   const s=state.tickers.get(ticker);if(!s||price<=s.high+0.001)return;
-  // Minimum RVol gate — only alert on genuine unusual activity (mirrors NuntioBot)
-  if(gapper.rvol<2)return;
+
+  // ── Quality gates (mirrors NuntioBot strictness) ──────────────────────────
+  // 1. Minimum time-normalized RVol: must be genuinely unusual volume
+  if(gapper.rvol<3)return;
+  // 2. Minimum absolute volume: ignore ghost stocks (e.g. AALG 6K vol)
+  if(gapper.volume<25000)return;
+  // 3. Significant price move from LAST ALERTED price (not just any penny new high)
+  //    Prevents WGRX firing 4x in 5 min on micro-ticks
+  const lastAlerted=state.lastAlertedPrice.get(ticker)||0;
+  const minMoveRequired=lastAlerted>0?lastAlerted*1.04:0; // must be 4% above last alert
+  if(lastAlerted>0&&price<minMoveRequired)return;
+  // ─────────────────────────────────────────────────────────────────────────
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod});
 
@@ -164,6 +174,7 @@ async function fireNHOD(ticker,price){
   const last=state.nhodCooldown.get(ticker)||0;
   if(Date.now()-last<5*60*1000)return;
   state.nhodCooldown.set(ticker,Date.now());
+  state.lastAlertedPrice.set(ticker,price); // track price at alert time for significance check
 
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
   const[fv,newsUrl,rs,prof]=await Promise.all([getFinvizData(ticker),getLatestNewsUrl(ticker),getRecentSplit(ticker),getProfile(ticker)]);
@@ -379,6 +390,7 @@ async function checkGreenBars(){
     try{
       const last=state.sentGreenBar.get(g.ticker)||0;
       if(Date.now()-last<15*60*1000)continue;
+      if(g.rvol<3||g.volume<25000)continue; // same quality bar as NHOD
       const now=new Date();
       const from=new Date(now-60*60*1000).toISOString().slice(0,10);
       const to=now.toISOString().slice(0,10);
