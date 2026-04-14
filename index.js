@@ -4,7 +4,7 @@
 const https = require('https');
 const WebSocket = require('ws');
 
-const POLY_KEY = '5jLrhuNS7DQZCp3eZpKHiuCBxuTddlLc';
+const POLY_KEY = process.env.POLY_KEY||'';
 const BOT_NAME = 'AziziBot';
 
 const WH = {
@@ -592,8 +592,287 @@ function subscribeNewTickers(newTickers){
   newTickers.forEach(t=>subscribedTickers.add(t));
 }
 
+
+// ─── Discord Bot (slash commands + ticker lookup) ────────────────────────────
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN||'';
+const APP_ID        = process.env.DISCORD_APP_ID||'1493671812247322624';
+const DISCORD_API   = 'https://discord.com/api/v10';
+
+// Discord REST helper
+function discordRest(method, path, body=null){
+  return new Promise((resolve,reject)=>{
+    const data=body?JSON.stringify(body):null;
+    const u=new URL(`${DISCORD_API}${path}`);
+    const req=https.request({
+      hostname:u.hostname, path:u.pathname+u.search, method,
+      headers:{'Authorization':`Bot ${DISCORD_TOKEN}`,'Content-Type':'application/json',...(data?{'Content-Length':Buffer.byteLength(data)}:{})}
+    },res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>{try{resolve(JSON.parse(d));}catch(e){resolve({});} });});
+    req.on('error',reject);
+    if(data)req.write(data);
+    req.end();
+  });
+}
+
+// Reply to an interaction
+async function replyInteraction(id, token, data){
+  await discordRest('POST',`/interactions/${id}/${token}/callback`,{type:4,data});
+}
+
+// Deferred reply (for slower commands)
+async function deferInteraction(id, token){
+  await discordRest('POST',`/interactions/${id}/${token}/callback`,{type:5});
+}
+async function editInteractionReply(token, data){
+  await discordRest('PATCH',`/webhooks/${APP_ID}/${token}/messages/@original`,data);
+}
+
+// ─── Command handlers ─────────────────────────────────────────────────────────
+
+async function buildTickerEmbed(ticker){
+  ticker=ticker.toUpperCase().trim();
+  const[snap,details,yahoo,rs,newsItems]=await Promise.all([
+    polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+    getTickerDetails(ticker),
+    getYahooStats(ticker),
+    getRecentSplit(ticker),
+    polyGet(`/v2/reference/news?ticker=${ticker}&limit=5&order=desc&sort=published_utc`)
+  ]);
+  const td=snap&&snap.ticker;
+  if(!td)return null;
+  const price=(td.lastTrade&&td.lastTrade.p)||(td.day&&td.day.c)||0;
+  const prev=(td.prevDay&&td.prevDay.c)||0;
+  const chgPct=price>0&&prev>0?((price-prev)/prev)*100:0;
+  const vol=(td.day&&td.day.v)||0;
+  const pv2=(td.prevDay&&td.prevDay.v)||0;
+  const minutesActive=Math.max(getETInfo().etMin-240,1);
+  const timeScale=Math.min(780/minutesActive,30);
+  const rvol=pv2>0?(vol*timeScale)/pv2:0;
+  const mc=details.market_cap||0;
+  const high52=(td.day&&td.day.h)||0;
+  const low52=(td.day&&td.day.l)||0;
+  const gapper=topGappers.find(g=>g.ticker===ticker);
+  const color=chgPct>=0?0x26a641:0xe03e3e;
+  const arrow=chgPct>=0?'▲':'▼';
+
+  // News headlines
+  const news=(newsItems&&newsItems.results)||[];
+  const newsStr=news.slice(0,5).map(n=>`• [${(n.title||'').slice(0,80)}](<${n.article_url||''}>)`).join('\n')||'No recent news';
+
+  const fields=[
+    {name:'Price',value:`$${price.toFixed(4)}  ${arrow} \`${chgPct>=0?'+':''}${chgPct.toFixed(2)}%\``,inline:true},
+    {name:'Volume',value:fmtN(vol),inline:true},
+    {name:'RVol',value:fmtRVol(rvol),inline:true},
+    {name:'Market Cap',value:mc>0?fmtN(mc):'--',inline:true},
+    {name:'Float',value:yahoo.float!=='--'?yahoo.float:'--',inline:true},
+    {name:'SI%',value:yahoo.si!=='--'?yahoo.si:'--',inline:true},
+    {name:'Day High / Low',value:`$${high52.toFixed(4)} / $${low52.toFixed(4)}`,inline:true},
+    {name:'Prev Close',value:`$${prev.toFixed(4)}`,inline:true},
+  ];
+  if(rs)fields.push({name:'Recent Split',value:rs,inline:false});
+  if(gapper)fields.push({name:'Status',value:`🔥 Hot Gapper  \`+${gapper.chgPct.toFixed(1)}%\``,inline:false});
+  fields.push({name:'Latest News',value:newsStr,inline:false});
+
+  return{
+    embeds:[{
+      title:`${ticker} — ${details.name||ticker}`,
+      color,
+      fields,
+      footer:{text:`AziziBot · ${getETInfo().timeStr} ET`},
+      timestamp:new Date().toISOString()
+    }]
+  };
+}
+
+async function cmdQuote(ticker){
+  return await buildTickerEmbed(ticker)||{content:`No data found for **${ticker.toUpperCase()}**`};
+}
+
+async function cmdGappers(){
+  if(!topGappers.length)return{content:'No hot gappers right now.'};
+  const rows=topGappers.map(g=>`**${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}`).join('\n');
+  return{embeds:[{title:`🔥 Hot Gappers (${topGappers.length})`,description:rows,color:0x00d4ff,footer:{text:`AziziBot · ${getETInfo().timeStr} ET`},timestamp:new Date().toISOString()}]};
+}
+
+async function cmdNews(ticker){
+  ticker=ticker.toUpperCase().trim();
+  const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=8&order=desc&sort=published_utc`);
+  const items=(r&&r.results)||[];
+  if(!items.length)return{content:`No recent news for **${ticker}**`};
+  const rows=items.map(n=>{
+    const age=Math.round((Date.now()-new Date(n.published_utc).getTime())/60000);
+    const ageStr=age<60?`${age}m ago`:`${Math.floor(age/60)}h ago`;
+    return `• [${(n.title||'').slice(0,90)}](<${n.article_url||''}>) — *${ageStr}*`;
+  }).join('\n');
+  return{embeds:[{title:`📰 ${ticker} — Latest News`,description:rows,color:0x5865f2,footer:{text:`AziziBot · ${getETInfo().timeStr} ET`}}]};
+}
+
+async function cmdSI(ticker){
+  ticker=ticker.toUpperCase().trim();
+  const[yahoo,details]=await Promise.all([getYahooStats(ticker),getTickerDetails(ticker)]);
+  const mc=details.market_cap||0;
+  const fields=[
+    {name:'Short Interest %',value:yahoo.si!=='--'?yahoo.si:'--',inline:true},
+    {name:'Float',value:yahoo.float!=='--'?yahoo.float:'--',inline:true},
+    {name:'Market Cap',value:mc>0?fmtN(mc):'--',inline:true},
+  ];
+  return{embeds:[{title:`📊 ${ticker} — Short Interest & Float`,color:0xf0a500,fields,footer:{text:`AziziBot · Yahoo Finance · ${getETInfo().timeStr} ET`}}]};
+}
+
+async function cmdHalts(){
+  // Pull last 10 halts from NASDAQ RSS
+  try{
+    const xml=await rawGet('https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts');
+    const items=xml.match(/<item>[\s\S]*?<\/item>/g)||[];
+    const halts=[];
+    for(const item of items.slice(0,10)){
+      const ticker=((item.match(/<IssueSymbol>(.*?)<\/IssueSymbol>/)||[])[1]||'').trim();
+      const reason=((item.match(/<ReasonCode>(.*?)<\/ReasonCode>/)||[])[1]||'').trim();
+      const haltTime=((item.match(/<HaltTime>(.*?)<\/HaltTime>/)||[])[1]||'').trim();
+      const resumeTime=((item.match(/<ResumptionTime>(.*?)<\/ResumptionTime>/)||[])[1]||'').trim();
+      if(!ticker)continue;
+      const status=resumeTime?`▶️ Resumed ${resumeTime}`:`⏸️ Halted ${haltTime}`;
+      halts.push(`**${ticker}** — ${status} | ${reason}`);
+    }
+    if(!halts.length)return{content:'No active halts found.'};
+    return{embeds:[{title:'⏸️ Recent Trading Halts',description:halts.join('\n'),color:0xe03e3e,footer:{text:`AziziBot · NASDAQ · ${getETInfo().timeStr} ET`}}]};
+  }catch(e){return{content:'Could not fetch halt data right now.'};}
+}
+
+async function cmdFilings(ticker){
+  ticker=ticker.toUpperCase().trim();
+  const r=await polyGet(`/vX/reference/filings?ticker=${ticker}&limit=8&order=desc&sort=filed_at`);
+  const filings=(r&&r.results)||[];
+  if(!filings.length)return{content:`No recent filings found for **${ticker}**`};
+  const rows=filings.map(f=>{
+    const ft=(f.form_type||'SEC').toUpperCase();
+    const isDil=/S-3|S-1|424B|8-K/.test(ft);
+    const filed=f.filed_at?new Date(f.filed_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'';
+    return `${isDil?'⚠️':'📋'} **${ft}** ${filed?`· ${filed}`:''}${f.filing_url?` · [Link](<${f.filing_url}>)`:''}`;
+  }).join('\n');
+  return{embeds:[{title:`📋 ${ticker} — SEC Filings`,description:rows,color:0x7289da,footer:{text:`AziziBot · Polygon.io · ${getETInfo().timeStr} ET`}}]};
+}
+
+async function cmdFloat(ticker){
+  return await cmdSI(ticker); // same data source
+}
+
+// ─── Discord Gateway (receives slash commands + messages) ─────────────────────
+let wsDiscord=null;
+let discordHeartbeatInterval=null;
+let discordSessionId=null;
+let discordSeq=null;
+
+function connectDiscordGateway(){
+  if(wsDiscord){try{wsDiscord.terminate();}catch(e){}}
+  console.log('Connecting to Discord gateway...');
+  wsDiscord=new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');
+
+  wsDiscord.on('open',()=>console.log('[Discord] Gateway connected'));
+
+  wsDiscord.on('message',async data=>{
+    try{
+      const msg=JSON.parse(data.toString());
+      if(msg.s)discordSeq=msg.s;
+
+      // op 10 = Hello — start heartbeat + identify
+      if(msg.op===10){
+        const interval=msg.d.heartbeat_interval;
+        if(discordHeartbeatInterval)clearInterval(discordHeartbeatInterval);
+        discordHeartbeatInterval=setInterval(()=>{
+          wsDiscord.send(JSON.stringify({op:1,d:discordSeq}));
+        },interval);
+        // Identify
+        wsDiscord.send(JSON.stringify({op:2,d:{
+          token:DISCORD_TOKEN,
+          intents:(1<<9)|(1<<15), // GUILD_MESSAGES + MESSAGE_CONTENT
+          properties:{os:'linux',browser:'azizibot',device:'azizibot'}
+        }}));
+      }
+
+      // op 0 = Dispatch
+      if(msg.op===0){
+        if(msg.t==='READY'){
+          discordSessionId=msg.d.session_id;
+          console.log(`[Discord] Ready as ${msg.d.user.username}`);
+        }
+
+        // Slash command interaction
+        if(msg.t==='INTERACTION_CREATE'&&msg.d.type===2){
+          const interaction=msg.d;
+          const cmd=interaction.data.name;
+          const option=(interaction.data.options&&interaction.data.options[0]&&interaction.data.options[0].value)||'';
+          await deferInteraction(interaction.id,interaction.token);
+          let reply={content:'Unknown command'};
+          try{
+            if(cmd==='quote')reply=await cmdQuote(option);
+            else if(cmd==='gappers')reply=await cmdGappers();
+            else if(cmd==='news')reply=await cmdNews(option);
+            else if(cmd==='si')reply=await cmdSI(option);
+            else if(cmd==='halt')reply=await cmdHalts();
+            else if(cmd==='filings')reply=await cmdFilings(option);
+            else if(cmd==='float')reply=await cmdFloat(option);
+          }catch(e){reply={content:`Error: ${e.message}`};}
+          await editInteractionReply(interaction.token,reply);
+        }
+
+        // Message — if just a ticker e.g. "WGRX" or "$WGRX" respond with full card
+        if(msg.t==='MESSAGE_CREATE'&&!msg.d.author.bot){
+          const content=(msg.d.content||'').trim();
+          const tickerMatch=content.match(/^\$?([A-Z]{1,5})$/);
+          if(tickerMatch){
+            const ticker=tickerMatch[1];
+            const embed=await buildTickerEmbed(ticker);
+            if(embed){
+              await discordRest('POST',`/channels/${msg.d.channel_id}/messages`,embed);
+            }
+          }
+        }
+      }
+
+      // op 7 = Reconnect
+      if(msg.op===7){
+        console.log('[Discord] Reconnect requested');
+        wsDiscord.terminate();
+        setTimeout(connectDiscordGateway,1000);
+      }
+
+      // op 9 = Invalid session
+      if(msg.op===9){
+        console.log('[Discord] Invalid session, re-identifying in 5s');
+        setTimeout(connectDiscordGateway,5000);
+      }
+    }catch(e){console.error('[Discord] Message error:',e.message);}
+  });
+
+  wsDiscord.on('error',err=>console.error('[Discord] Gateway error:',err.message));
+  wsDiscord.on('close',(code)=>{
+    console.log(`[Discord] Gateway closed (${code}), reconnecting in 5s...`);
+    if(discordHeartbeatInterval)clearInterval(discordHeartbeatInterval);
+    setTimeout(connectDiscordGateway,5000);
+  });
+}
+
+// Register slash commands on startup
+async function registerSlashCommands(){
+  const commands=[
+    {name:'quote',description:'Live price, volume, RVol, MC, float, SI for a ticker',options:[{type:3,name:'ticker',description:'Stock ticker (e.g. TSLA)',required:true}]},
+    {name:'gappers',description:'Current hot gappers list'},
+    {name:'news',description:'Latest news headlines for a ticker',options:[{type:3,name:'ticker',description:'Stock ticker',required:true}]},
+    {name:'si',description:'Short interest % and float',options:[{type:3,name:'ticker',description:'Stock ticker',required:true}]},
+    {name:'halt',description:'Recent trading halts and resumes'},
+    {name:'filings',description:'Latest SEC filings for a ticker',options:[{type:3,name:'ticker',description:'Stock ticker',required:true}]},
+    {name:'float',description:'Float and short interest for a ticker',options:[{type:3,name:'ticker',description:'Stock ticker',required:true}]},
+  ];
+  try{
+    const r=await discordRest('PUT',`/applications/${APP_ID}/commands`,commands);
+    console.log(`[Discord] Registered ${Array.isArray(r)?r.length:0} slash commands`);
+  }catch(e){console.error('[Discord] Command registration error:',e.message);}
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main(){
+  if(!POLY_KEY)  {console.error('FATAL: POLY_KEY env var missing');process.exit(1);}
+  if(!DISCORD_TOKEN){console.error('FATAL: DISCORD_TOKEN env var missing');process.exit(1);}
   console.log('🤖 AziziBot v5 starting — hot names + news only...');
   await refreshEtfList();
   await refreshTopGappers();
@@ -627,7 +906,9 @@ async function main(){
     await checkSECFilings();
   },60*1000);
 
-  console.log('🤖 AziziBot v5 running. Hot names + news alerts active.');
+  await registerSlashCommands();
+  connectDiscordGateway();
+  console.log('🤖 AziziBot v5 running. Hot names + news alerts + Discord commands active.');
 }
 
 main().catch(err=>{console.error('Fatal:',err);process.exit(1);});
