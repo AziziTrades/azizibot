@@ -284,7 +284,11 @@ async function refreshTopGappers(){
       const timeScale=Math.min(780/minutesActive,30);
       const rvol=pv2>0?(vol*timeScale)/pv2:0;
       const exchange=t.primaryExchange||t.primary_exchange||'';
-      const isOTC=!exchange||/OTC|GREY|PINK|EXPERT/i.test(exchange)||exchange==='OTC';
+      // OTC detection: exchange flag + ticker pattern
+      // 5-letter tickers with OTC suffixes: F=foreign, Y=ADR, Q=bankruptcy, E=delinquent, X=mutual fund
+      const isOTCExchange=!exchange||/OTC|GREY|PINK|EXPERT|OTC BB/i.test(exchange);
+      const isOTCTicker=/^[A-Z]{5}$/.test(t.ticker)&&/[FQEX]$/.test(t.ticker)||t.ticker.includes('.');
+      const isOTC=isOTCExchange||isOTCTicker;
       return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,high:(t.day&&t.day.h)||lp,isOTC};
     };
     const merge=new Map();
