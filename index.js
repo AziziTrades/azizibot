@@ -182,9 +182,9 @@ const MIN_PRICE  = 0.10;
 async function refreshTopGappers(){
   try{
     const [pg,pc,pv]=await Promise.all([
-      polyGet('/v2/snapshot/locale/us/markets/stocks/gainers?include_otc=true'),
-      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?include_otc=true&sort=changePercent&direction=desc&limit=100'),
-      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?include_otc=true&sort=volume&direction=desc&limit=100')
+      polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers&sort=changePercent&direction=desc&limit=100'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers&sort=volume&direction=desc&limit=100')
     ]);
     const build=t=>{
       const lp=(t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
@@ -195,7 +195,9 @@ async function refreshTopGappers(){
       const minutesActive=Math.max(getETInfo().etMin-240,1);
       const timeScale=Math.min(780/minutesActive,30);
       const rvol=pv2>0?(vol*timeScale)/pv2:0;
-      return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,high:(t.day&&t.day.h)||lp};
+      const exchange=t.primaryExchange||t.primary_exchange||'';
+      const isOTC=!exchange||/OTC|GREY|PINK|EXPERT/i.test(exchange)||exchange==='OTC';
+      return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,high:(t.day&&t.day.h)||lp,isOTC};
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
@@ -206,7 +208,8 @@ async function refreshTopGappers(){
         t.price<=MAX_PRICE &&
         t.volume>=MIN_VOL &&
         t.rvol>=MIN_RVOL &&
-        !isEtf(t.ticker)
+        !isEtf(t.ticker) &&
+        !t.isOTC
       )
       .sort((a,b)=>b.chgPct-a.chgPct)
       .slice(0,20); // top 20 only
