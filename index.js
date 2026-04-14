@@ -98,22 +98,45 @@ async function getRecentSplit(ticker){
 async function getYahooStats(ticker){
   const r={si:'--',float:'--'};
   try{
-    const url=`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`;
+    // Try both modules for better coverage across all tickers
+    const url=`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics%2CsummaryDetail`;
     const raw=await new Promise((resolve,reject)=>{
-      const req=https.get(url,{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/json'}},res=>{
+      const req=https.get(url,{
+        headers:{
+          'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept':'application/json',
+          'Accept-Language':'en-US,en;q=0.9'
+        }
+      },res=>{
         let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
       });
-      req.on('error',reject);req.setTimeout(5000,()=>{req.destroy();reject(new Error('timeout'));});
+      req.on('error',reject);req.setTimeout(6000,()=>{req.destroy();reject(new Error('timeout'));});
     });
     const j=JSON.parse(raw);
-    const ks=j?.quoteSummary?.result?.[0]?.defaultKeyStatistics;
-    if(ks){
-      const siPct=ks.shortPercentOfFloat?.raw||0;
-      if(siPct>0)r.si=`${(siPct*100).toFixed(1)}%`;
-      const floatShares=ks.floatShares?.raw||0;
-      if(floatShares>0)r.float=fmtN(floatShares);
+    const result=j?.quoteSummary?.result?.[0];
+    const ks=result?.defaultKeyStatistics||{};
+    const sd=result?.summaryDetail||{};
+
+    // Float — try multiple field paths
+    const floatShares=
+      ks.floatShares?.raw||
+      ks.impliedSharesOutstanding?.raw||
+      sd.floatShares?.raw||0;
+    if(floatShares>0)r.float=fmtN(floatShares);
+
+    // Short interest — try multiple fields
+    const siPct=
+      ks.shortPercentOfFloat?.raw||
+      ks.shortPercentOfFloatShares?.raw||0;
+    const siShares=ks.sharesShort?.raw||0;
+    const sharesOut=ks.sharesOutstanding?.raw||floatShares||0;
+    if(siPct>0){
+      r.si=`${(siPct*100).toFixed(1)}%`;
+    }else if(siShares>0&&sharesOut>0){
+      // Calculate SI% from raw shares if percent not available
+      r.si=`${((siShares/sharesOut)*100).toFixed(1)}%`;
     }
-  }catch(e){}
+  }catch(e){console.error(`[Yahoo] ${ticker}:`,e.message);}
   return r;
 }
 
