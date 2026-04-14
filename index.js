@@ -112,15 +112,18 @@ async function getYahooStats(ticker){
       });
       req.on('error',reject);req.setTimeout(6000,()=>{req.destroy();reject(new Error('timeout'));});
     });
-    // Finviz table format: <td class="snapshot-td2">VALUE</td>
-    // Float row label is "Shs Float", SI% label is "Short Float"
-    const floatM=html.match(/Shs Float<\/td><td[^>]*>([^<]+)<\/td>/i)||
-                 html.match(/Shs Float[^<]*<\/td>\s*<td[^>]*>([^<]+)<\/td>/i);
+    // Finviz wraps labels in <b> tags inside <td>
+    // Pattern: <b>Shs Float</b></td><td ...>VALUE</td>
+    const floatM=html.match(/Shs Float<\/b><\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||
+                 html.match(/Shs\s+Float[^<]*<\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||
+                 html.match(/Shs Float[^<]*>([\d.]+[MBK])</i);
     if(floatM)r.float=floatM[1].trim();
 
-    const siM=html.match(/Short Float[^<]*<\/td><td[^>]*>([\d.]+%)<\/td>/i)||
-              html.match(/Short Float[^<]*<\/td>\s*<td[^>]*>([\d.]+%)<\/td>/i);
-    if(siM)r.si=siM[1].trim();
+    const siM=html.match(/Short Float[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||
+              html.match(/Short Float[^<]*>([\d.]+%)/i);
+    if(siM)r.si=siM[1].includes('%')?siM[1].trim():siM[1].trim()+'%';
+    // Debug: log if still missing data
+    if(r.float==='--'||r.si==='--')console.log(`[Finviz] ${ticker} partial: float=${r.float} si=${r.si} html_len=${html.length}`);
   }catch(e){console.error(`[Finviz] ${ticker}:`,e.message);}
   return r;
 }
