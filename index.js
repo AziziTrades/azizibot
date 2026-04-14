@@ -98,6 +98,70 @@ async function getRecentSplit(ticker){
 async function getYahooStats(ticker){
   const r={si:'--',float:'--'};
   try{
+    // Finviz free page — no API key needed, has float + SI% for all tickers
+    const html=await new Promise((resolve,reject)=>{
+      const req=https.get(`https://finviz.com/quote.ashx?t=${ticker}`,{
+        headers:{
+          'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept':'text/html,application/xhtml+xml',
+          'Accept-Language':'en-US,en;q=0.9',
+          'Referer':'https://finviz.com/'
+        }
+      },res=>{
+        let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
+      });
+      req.on('error',reject);req.setTimeout(6000,()=>{req.destroy();reject(new Error('timeout'));});
+    });
+    // Finviz table format: <td class="snapshot-td2">VALUE</td>
+    // Float row label is "Shs Float", SI% label is "Short Float"
+    const floatM=html.match(/Shs Float<\/td><td[^>]*>([^<]+)<\/td>/i)||
+                 html.match(/Shs Float[^<]*<\/td>\s*<td[^>]*>([^<]+)<\/td>/i);
+    if(floatM)r.float=floatM[1].trim();
+
+    const siM=html.match(/Short Float[^<]*<\/td><td[^>]*>([\d.]+%)<\/td>/i)||
+              html.match(/Short Float[^<]*<\/td>\s*<td[^>]*>([\d.]+%)<\/td>/i);
+    if(siM)r.si=siM[1].trim();
+  }catch(e){console.error(`[Finviz] ${ticker}:`,e.message);}
+  return r;
+}
+
+async function getTickerDetails(ticker){
+  const c=tickerCache.get(ticker);
+  if(c&&Date.now()-c.ts<60*60*1000)return c.data;
+  try{
+    const r=await polyGet(`/v3/reference/tickers/${ticker}`);
+    const data=(r&&r.results)||{};
+    tickerCache.set(ticker,{data,ts:Date.now()});
+    return data;
+  }catch(e){return{};}
+}
+
+async function getLatestNewsUrl(ticker){
+  try{
+    const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
+    const items=(r&&r.results)||[];
+    if(items.length&&items[0].article_url)return items[0].article_url;
+  }catch(e){}
+  return null;
+}
+
+async function getRecentSplit(ticker){
+  try{
+    const r=await polyGet(`/v3/reference/splits?ticker=${ticker}&limit=10&order=desc`);
+    const splits=(r&&r.results)||[];
+    const s=splits.find(s=>{
+      const d=(Date.now()-new Date(s.execution_date).getTime())/86400000;
+      return d<=90&&s.split_from>s.split_to;
+    });
+    if(s){const d=new Date(s.execution_date);return `${s.split_to} for ${s.split_from} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`;}
+  }catch(e){}
+  return null;
+}
+
+// Yahoo Finance — SI% + Float (free, no key needed)
+async function getYahooStats(ticker){
+  const r={si:'--',float:'--'};
+  try{
     // Try both modules for better coverage across all tickers
     const url=`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics%2CsummaryDetail`;
     const raw=await new Promise((resolve,reject)=>{
