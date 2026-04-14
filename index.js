@@ -221,7 +221,7 @@ async function fireGapperAlert(g){
   const etInfo=getETInfo();
   console.log(`[${etInfo.timeStr}] HOT GAPPER: ${g.ticker} +${g.chgPct.toFixed(1)}% RVol:${fmtRVol(g.rvol)}`);
 
-  const[newsUrl,rs,details,si]=await Promise.all([
+  const[newsUrl,rs,details,yahoo]=await Promise.all([
     getLatestNewsUrl(g.ticker),
     getRecentSplit(g.ticker),
     getTickerDetails(g.ticker),
