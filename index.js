@@ -216,13 +216,16 @@ async function refreshTopGappers(){
       const chg=lp>0&&prev>0?((lp-prev)/prev)*100:(t.todaysChangePerc||0);
       const vol=(t.day&&t.day.v)||0;
       const pv2=(t.prevDay&&t.prevDay.v)||0;
-      // NuntioBot-style RVol: use Polygon's min.av (30-day avg minute volume × minutes active)
-      const avgMinVol=(t.min&&t.min.av)||0;
+      // Correct RVol: time-normalize today's volume vs yesterday's full day
+      // Formula: (todayVol / minutesActive) / (prevDayVol / 390 trading minutes)
+      // = todayVol * 390 / (minutesActive * prevDayVol)
       const minutesActive=Math.max(etMin-240,1);
-      const rvol=avgMinVol>0?vol/(avgMinVol*minutesActive)
-                             :pv2>0?(vol*Math.min(780/minutesActive,30))/pv2:0;
+      const tradingMins=390; // standard trading day minutes
+      const rvol=pv2>0?(vol*tradingMins)/(minutesActive*pv2):vol>100000?5:0; // no prevDay data → assume 5x if enough volume
       const exchange=t.primaryExchange||'';
-      const isOTCEx=!exchange||/OTC|GREY|PINK|EXPERT/i.test(exchange);
+      // Only flag as OTC if exchange explicitly says OTC — empty exchange is OK
+      // Many legit small caps don't have primaryExchange in the snapshot
+      const isOTCEx=/OTC|GREY|PINK|EXPERT/i.test(exchange);
       return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,
              high:(t.day&&t.day.h)||lp,exchange,isOTCEx};
     };
@@ -629,8 +632,7 @@ async function buildTickerEmbed(ticker){
   const pv2=(td.prevDay&&td.prevDay.v)||0;
   const{etMin}=getETInfo();
   const minutesActive=Math.max(etMin-240,1);
-  const avgMinVol=(td.min&&td.min.av)||0;
-  const rvol=avgMinVol>0?vol/(avgMinVol*minutesActive):pv2>0?(vol*Math.min(780/minutesActive,30))/pv2:0;
+  const rvol=pv2>0?(vol*390)/(minutesActive*pv2):vol>100000?5:0;
   const mc=det.market_cap||0;
   const color=chgPct>=0?0x26a641:0xe03e3e;
   const cutoff=Date.now()-30*24*60*60*1000;
