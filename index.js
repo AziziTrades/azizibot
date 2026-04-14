@@ -1,13 +1,11 @@
-// AziziBot v3 — Real-time Discord alerts matching NuntioBot
+// AziziBot v4 — Polygon-only, real-time news WebSocket
 // Railway.app — Node.js 18+
 
 const https = require('https');
 const WebSocket = require('ws');
 
-const POLY_KEY   = '5jLrhuNS7DQZCp3eZpKHiuCBxuTddlLc';
-const FMP_KEY    = 'nBekBFFFeKcrOj6Nd95DiF43jEEkJDW4';
-const FINVIZ_KEY = '6a7d3078-e6c0-4537-823f-b140c3b0dcb6';
-const BOT_NAME   = 'AziziBot';
+const POLY_KEY = '5jLrhuNS7DQZCp3eZpKHiuCBxuTddlLc';
+const BOT_NAME = 'AziziBot';
 
 const WH = {
   TOP_GAPPERS:    'https://discord.com/api/webhooks/1493250562689597623/57UTSPu2KfLmYNBRVPvPQIa4cSfCQA8wVcqB5d0J8cWYaJf5hlsm1EuRkQ3lolChTNh3',
@@ -38,7 +36,7 @@ function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
 function rawGet(url){
   return new Promise((resolve,reject)=>{
-    const req=https.get(url,{headers:{'User-Agent':'AziziBot/1.0 contact@azizibot.com'}},res=>{
+    const req=https.get(url,{headers:{'User-Agent':'AziziBot/1.0'}},res=>{
       let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));
     });
     req.on('error',reject);
@@ -47,7 +45,6 @@ function rawGet(url){
 }
 async function jsonGet(url){try{return JSON.parse(await rawGet(url));}catch(e){return null;}}
 function polyGet(path){const sep=path.includes('?')?'&':'?';return jsonGet(`https://api.polygon.io${path}${sep}apiKey=${POLY_KEY}`);}
-function fmpGet(path){const sep=path.includes('?')?'&':'?';return jsonGet(`https://financialmodelingprep.com${path}${sep}apikey=${FMP_KEY}`);}
 
 async function post(webhook,payload){
   payload.username=BOT_NAME;
@@ -61,66 +58,88 @@ async function post(webhook,payload){
   });
 }
 
-async function getFinvizData(ticker){
-  const r={si:'--',regSho:false,ctb:''};
+// Ticker details cache (market cap, type) — 1 hour TTL
+const tickerCache=new Map();
+async function getTickerDetails(ticker){
+  const c=tickerCache.get(ticker);
+  if(c&&Date.now()-c.ts<60*60*1000)return c.data;
   try{
-    const html=await new Promise((resolve,reject)=>{
-      const req=https.get(`https://elite.finviz.com/quote.ashx?t=${ticker}&auth=${FINVIZ_KEY}`,
-        {headers:{'User-Agent':'Mozilla/5.0','Cookie':`finvizAuth=${FINVIZ_KEY}`,'Referer':'https://elite.finviz.com/'}},
-        res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>resolve(d));});
-      req.on('error',reject);req.setTimeout(3000,()=>{req.destroy();reject(new Error('timeout'));});
-    });
-    const siM=html.match(/Short Float[^>]*>([\d.]+%)/i);if(siM)r.si=siM[1];
-    r.regSho=/Reg SHO.*?Yes/i.test(html);
-    const ctbM=html.match(/CTB[^>]*>([^<]{1,15})<\/td>/i);
-    if(ctbM){const v=ctbM[1].trim();r.ctb=/high/i.test(v)?'High CTB':/low/i.test(v)?'Low CTB':'';}
-  }catch(e){}
-  return r;
+    const r=await polyGet(`/v3/reference/tickers/${ticker}`);
+    const data=(r&&r.results)||{};
+    tickerCache.set(ticker,{data,ts:Date.now()});
+    return data;
+  }catch(e){return{};}
 }
-async function getProfile(ticker){try{const p=await fmpGet(`/stable/profile?symbol=${ticker}`);return(Array.isArray(p)?p[0]:p)||{};}catch(e){return{};}}
-async function getLatestNewsUrl(ticker){try{const n=await fmpGet(`/stable/news/stock?symbols=${ticker}&limit=1`);if(Array.isArray(n)&&n.length&&n[0].url)return n[0].url;}catch(e){}return null;}
-async function getRecentSplit(ticker){
+
+async function getLatestNewsUrl(ticker){
   try{
-    const splits=await fmpGet(`/stable/splits?symbol=${ticker}`);
-    if(Array.isArray(splits)&&splits.length){
-      const s=splits.find(s=>{const d=(Date.now()-new Date(s.date).getTime())/86400000;return d<=90&&s.denominator>s.numerator;});
-      if(s){const d=new Date(s.date);return `${s.numerator} for ${s.denominator} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`;}
-    }
+    const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
+    const items=(r&&r.results)||[];
+    if(items.length&&items[0].article_url)return items[0].article_url;
   }catch(e){}
   return null;
 }
 
-const state={
-  tickers:new Map(),sentNews:new Set(),sentHalts:new Set(),sentResumes:new Set(),
-  sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),sentGreenBar:new Map(),
-  morningPosted:new Set(),lastTrade:new Map(),priceHistory:new Map(),
-  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertWindow:new Map()
-};
-let topGappers=[];
-let lastFilingCheck=0;
-let lastHaltCheck=0;
+async function getRecentSplit(ticker){
+  try{
+    const r=await polyGet(`/v3/reference/splits?ticker=${ticker}&limit=10&order=desc`);
+    const splits=(r&&r.results)||[];
+    const s=splits.find(s=>{
+      const d=(Date.now()-new Date(s.execution_date).getTime())/86400000;
+      return d<=90&&s.split_from>s.split_to;
+    });
+    if(s){const d=new Date(s.execution_date);return `${s.split_to} for ${s.split_from} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`;}
+  }catch(e){}
+  return null;
+}
 
-// ETF filter — loaded once at startup, refreshed every 6 hours
+async function getShortInterest(ticker){
+  try{
+    const r=await polyGet(`/v2/reference/short_interest/${ticker}`);
+    const results=(r&&r.results)||[];
+    if(results.length){
+      const pct=results[0].percent_of_float||results[0].short_percent||0;
+      if(pct>0)return `${(pct*100).toFixed(1)}%`;
+    }
+  }catch(e){}
+  return '--';
+}
+
+// ETF filter — Polygon ticker type
 let etfSet=new Set();
 let lastEtfRefresh=0;
 async function refreshEtfList(){
   if(Date.now()-lastEtfRefresh<6*60*60*1000)return;
   try{
-    const list=await fmpGet('/stable/etf/list');
-    if(Array.isArray(list)&&list.length){
-      etfSet=new Set(list.map(e=>e.symbol||e.ticker||'').filter(Boolean));
-      lastEtfRefresh=Date.now();
-      console.log(`[ETF] Loaded ${etfSet.size} ETF tickers`);
+    let path='/v3/reference/tickers?type=ETF&market=stocks&active=true&limit=1000';
+    const newSet=new Set();
+    let pages=0;
+    while(path&&pages<5){
+      const r=await polyGet(path);
+      if(!r||!r.results)break;
+      r.results.forEach(t=>newSet.add(t.ticker));
+      path=r.next_url?r.next_url.replace('https://api.polygon.io',''):null;
+      pages++;
     }
+    if(newSet.size>0){etfSet=newSet;lastEtfRefresh=Date.now();console.log(`[ETF] Loaded ${etfSet.size} tickers`);}
   }catch(e){console.error('refreshEtfList:',e.message);}
 }
 function isEtf(ticker){
-  // Primary: FMP list lookup
   if(etfSet.has(ticker))return true;
-  // Fallback: common ETF ticker patterns (3-4 letters ending in common suffixes)
-  if(/^(SPY|QQQ|IWM|DIA|GLD|SLV|TLT|HYG|LQD|EEM|VXX|UVXY|SQQQ|TQQQ|SPXU|SPXL|LABD|LABU|NUGT|DUST|JNUG|JDST|NAIL|FAS|FAZ|TNA|TZA|UPRO|SDOW|UDOW|SOXL|SOXS|TECL|TECS|DFEN|WEBL|WEBS|FNGU|FNGG|HIBL|HIBS|DPST|DRN|DRV|MIDU|MIDZ|SMLL|BNKU|BNKD|CURE|SICK|WANT|OILU|OILD|GUSH|DRIP|ERX|ERY|KOLD|UGAZ|DGAZ|BOIL|KORU|YINN|YANG|EDC|EDZ|EET|EEV|EWJ|EWZ|XLF|XLE|XLK|XLV|XLI|XLP|XLU|XLB|XLY|XLRE|VTI|VOO|VEA|VWO|BND|AGG|EMB|BNDX|IEMG|ITOT|IEFA|IJR|IJH|IVV|GDX|GDXJ|SIL|SILJ|REMX|LIT|ARKK|ARKG|ARKW|ARKF|ARKX|PRNT|IZRL)$/.test(ticker))return true;
+  if(/^(SPY|QQQ|IWM|DIA|GLD|SLV|TLT|HYG|VXX|UVXY|SQQQ|TQQQ|SPXU|SPXL|SOXL|SOXS|TECL|TECS|LABD|LABU|NUGT|DUST|FAS|FAZ|TNA|TZA|UPRO|SDOW|UDOW|GUSH|DRIP|ERX|ERY|BOIL|KOLD|ARKK|ARKG|ARKW|ARKF|GDX|GDXJ|XLF|XLE|XLK|XLV|XLI|XLP|XLU|VTI|VOO|IVV|IJR|IJH)$/.test(ticker))return true;
   return false;
 }
+
+const state={
+  tickers:new Map(),sentHalts:new Set(),sentResumes:new Set(),
+  sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),
+  sentNews:new Set(),sentGreenBar:new Map(),morningPosted:new Set(),
+  lastTrade:new Map(),priceHistory:new Map(),recentNewsCache:new Map(),
+  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertWindow:new Map()
+};
+let topGappers=[];
+let lastFilingCheck=0;
+let lastHaltCheck=0;
 
 async function refreshTopGappers(){
   try{
@@ -135,10 +154,8 @@ async function refreshTopGappers(){
       const chg=lp>0&&prev>0?((lp-prev)/prev)*100:(t.todaysChangePerc||0);
       const vol=(t.day&&t.day.v)||(t.min&&t.min.av)||0;
       const pv2=(t.prevDay&&t.prevDay.v)||0;
-      // Time-normalized RVol: scale today's partial volume to a projected full-day equivalent
-      // Without this, pre-market RVol is always near 0 vs yesterday's full day
-      const minutesActive=Math.max(getETInfo().etMin-240,1); // minutes since 4AM pre-market open
-      const timeScale=Math.min(780/minutesActive,30);        // 780min = 4AM-7PM window; cap 30x
+      const minutesActive=Math.max(getETInfo().etMin-240,1);
+      const timeScale=Math.min(780/minutesActive,30);
       const rvol=pv2>0?(vol*timeScale)/pv2:0;
       return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,high:(t.day&&t.day.h)||lp};
     };
@@ -155,40 +172,27 @@ async function fireNHOD(ticker,price){
   const etInfo=getETInfo();
   const gapper=topGappers.find(g=>g.ticker===ticker);if(!gapper)return;
   const s=state.tickers.get(ticker);if(!s||price<=s.high+0.001)return;
-
-  // ── Quality gates (mirrors NuntioBot strictness) ──────────────────────────
-  // 1. Minimum time-normalized RVol: must be genuinely unusual volume
   if(gapper.rvol<3)return;
-  // 2. Minimum absolute volume: ignore ghost stocks (e.g. AALG 6K vol)
   if(gapper.volume<25000)return;
-  // 3. Significant price move from LAST ALERTED price (not just any penny new high)
-  //    Prevents WGRX firing 4x in 5 min on micro-ticks
   const lastAlerted=state.lastAlertedPrice.get(ticker)||0;
-  const minMoveRequired=lastAlerted>0?lastAlerted*1.10:0; // must be 10% above last alert
-  if(lastAlerted>0&&price<minMoveRequired)return;
-  // ─────────────────────────────────────────────────────────────────────────
+  if(lastAlerted>0&&price<lastAlerted*1.10)return;
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod});
-
-  // FIX: 5-minute cooldown per ticker (was 10 minutes)
   const last=state.nhodCooldown.get(ticker)||0;
-  if(Date.now()-last<15*60*1000)return; // 15-min cooldown per ticker
+  if(Date.now()-last<15*60*1000)return;
   state.nhodCooldown.set(ticker,Date.now());
-  // Max 3 alerts per ticker per 15-minute window — resets after window expires
   const now15=Date.now();
-  const window15=15*60*1000;
-  const times=(state.alertWindow.get(ticker)||[]).filter(t=>now15-t<window15);
+  const times=(state.alertWindow.get(ticker)||[]).filter(t=>now15-t<15*60*1000);
   if(times.length>=3)return;
   times.push(now15);
   state.alertWindow.set(ticker,times);
-  state.lastAlertedPrice.set(ticker,price); // track price at alert time for significance check
-
+  state.lastAlertedPrice.set(ticker,price);
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
-  const[fv,newsUrl,rs,prof]=await Promise.all([getFinvizData(ticker),getLatestNewsUrl(ticker),getRecentSplit(ticker),getProfile(ticker)]);
-  const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
-  const mc=prof.mktCap||prof.marketCap||0;
-  const ioStr=io>0?` | IO: ${(io<1?io*100:io).toFixed(2)}%`:'';
+  const[newsUrl,rs,details,si]=await Promise.all([getLatestNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getShortInterest(ticker)]);
+  const mc=details.market_cap||0;
   const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+  const siStr=si!=='--'?` | SI: ${si}`:'';
+  const rsStr=rs?` | ${rs}`:'';
   let afterLull='';
   const hist=state.priceHistory.get(ticker)||[];
   if(hist.length>=10){
@@ -196,20 +200,13 @@ async function fireNHOD(ticker,price){
     if(old.length>=3){const oH=Math.max(...old.map(h=>h.price)),oL=Math.min(...old.map(h=>h.price));if((oH-oL)/oL<0.02&&price>oH*1.03)afterLull=' · `after-lull`';}
   }
   let prInline='';
-  try{
-    const news=await fmpGet(`/stable/news/stock?symbols=${ticker}&limit=3`);
-    if(Array.isArray(news)){const fresh=news.find(n=>n.publishedDate&&(Date.now()-new Date(n.publishedDate).getTime())/60000<60&&n.url);
-      if(fresh){prInline=` | [PR+](<${fresh.url}>)`;state.sentNews.add((fresh.url||fresh.title||'').slice(0,100));}}
-  }catch(e){}
+  const recentNews=state.recentNewsCache.get(ticker);
+  if(recentNews&&(Date.now()-recentNews.ts)<60*60*1000)prInline=` | [PR+](<${recentNews.url}>)`;
   const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
   const sess=etInfo.sess;
   const label=nhod===1?(sess==='AFTER-HOURS'?'AHs':sess==='PRE-MARKET'?'PMH':'NSH'):`${nhod} NHOD`;
   const flag=countryFlag(ticker);
-  const regSho=fv.regSho?' | **Reg SHO**':'';
-  const si=fv.si!=='--'?` | SI: ${fv.si}`:'';
-  const ctb=fv.ctb?` | ${fv.ctb}`:'';
-  const rsStr=rs?` | ${rs}`:'';
-  const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${ioStr}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSho}${si}${ctb}${rsStr}${prInline}`;
+  const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${siStr}${rsStr}${prInline}`;
   await post(WH.MAIN_CHAT,{content:line});
 }
 
@@ -262,10 +259,9 @@ async function checkHalts(){
         const id=`snap_${g.ticker}`;if(state.sentHalts.has(id))continue;
         const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${g.ticker}`);
         const td=snap&&snap.ticker;if(!td)continue;
-        const ltMs=(td.lastTrade&&td.lastTrade.t)||0;const lqMs=(td.lastQuote&&td.lastQuote.t)||0;
-        if(!ltMs||!lqMs)continue;
+        const ltMs=(td.lastTrade&&td.lastTrade.t)||0;
         const now=Date.now();
-        if((now-ltMs)/1000<120||(now-lqMs)/1000<120)continue;
+        if((now-ltMs)/1000<120)continue;
         state.sentHalts.add(id);
         const minAgo=Math.floor((now-ltMs)/60000);
         const newsUrl=await getLatestNewsUrl(g.ticker);
@@ -273,131 +269,9 @@ async function checkHalts(){
         const line=`\`${etInfo.timeStr}\` **${g.ticker}** | **Halted** | Trading Pause → $${g.price.toFixed(2)} ~ ${fmtN(g.volume)} vol | ~${minAgo}m ago`;
         await post(WH.MAIN_CHAT,{content:line});await sleep(300);
         await post(WH.HALT_ALERTS,{content:line});
-        console.log(`[${etInfo.timeStr}] HALT(snap): ${g.ticker}`);
       }catch(e2){}
     }
   }
-}
-
-async function checkPRDrop(){
-  if(!isActive())return;
-  const etInfo=getETInfo();
-  // Dilutive / negative PR keywords — same logic NuntioBot uses for PR ↓ DROP
-  const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
-  try{
-    // Scan broad latest news — not just topGappers — so we catch tickers like TE fast
-    const news=await fmpGet('/stable/news/stock?limit=100');
-    if(!Array.isArray(news))return;
-    const cutoff=Date.now()-5*60*1000; // only fire on news within last 5 min
-    for(const n of news){
-      if(!n.publishedDate||new Date(n.publishedDate).getTime()<cutoff)continue;
-      const title=n.title||'';
-      if(!DROP_RE.test(title))continue;
-      const ticker=(n.symbol||n.symbols||'').toUpperCase().split(',')[0].trim();
-      if(!ticker||isEtf(ticker))continue;
-      const id=`prdrop_${(n.url||title).slice(0,100)}`;
-      if(state.sentPRDrop.has(id))continue;
-      state.sentPRDrop.add(id);
-      // Fetch snapshot for price, profile for IO/MC/SI
-      const [snap,prof,fv]=await Promise.all([
-        polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
-        getProfile(ticker),
-        getFinvizData(ticker)
-      ]);
-      const td=snap&&snap.ticker;
-      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-      const pFlag=price>0?priceFlag(price):'';
-      const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
-      const mc=prof.mktCap||prof.marketCap||0;
-      const ioStr=io>0?` | IO: ${(io<1?io*100:io).toFixed(2)}%`:'';
-      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-      const siStr=fv.si!=='--'?` | SI: ${fv.si}`:'';
-      const flag=countryFlag(ticker);
-      const link=n.url?` - [Link](<${n.url}>)`:'';
-      const priceStr=price>0?` \`${pFlag}\``:'';
-      const line=`**${ticker}**${priceStr} - ${title.slice(0,200)}${link} ~ ${flag}${ioStr}${mcStr}${siStr}`;
-      await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});
-      await sleep(300);
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});
-      await sleep(300);
-      console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker} — ${title.slice(0,60)}`);
-    }
-    if(state.sentPRDrop.size>500){const a=[...state.sentPRDrop];state.sentPRDrop.clear();a.slice(-200).forEach(id=>state.sentPRDrop.add(id));}
-  }catch(e){console.error('checkPRDrop:',e.message);}
-}
-
-async function checkPRSpike(){
-  if(!isActive())return;
-  const etInfo=getETInfo();
-  // Scan broad latest news — NOT just topGappers — so we catch GLMD-style
-  // catalysts the moment they publish, before the price even moves
-  const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
-  try{
-    const news=await fmpGet('/stable/news/stock?limit=100');
-    if(!Array.isArray(news))return;
-    const cutoff=Date.now()-5*60*1000; // within last 5 minutes for speed
-    for(const n of news){
-      if(!n.publishedDate||new Date(n.publishedDate).getTime()<cutoff)continue;
-      const title=n.title||'';
-      if(!SPIKE_RE.test(title))continue; // must have positive catalyst keywords
-      const ticker=(n.symbol||n.symbols||'').toUpperCase().split(',')[0].trim();
-      if(!ticker||isEtf(ticker))continue;
-      const id=`prspike_${(n.url||title).slice(0,80)}`;
-      if(state.sentPRSpike.has(id))continue;
-      state.sentPRSpike.add(id);
-      // Fetch snapshot for current price + profile for IO/MC
-      const [snap,prof]=await Promise.all([
-        polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
-        getProfile(ticker)
-      ]);
-      const td=snap&&snap.ticker;
-      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-      const io=prof.institutionalOwnershipPercentage||prof.institutionalOwnership||0;
-      const mc=prof.mktCap||prof.marketCap||0;
-      const ioStr=io>0?` | IO: ${(io<1?io*100:io).toFixed(2)}%`:'';
-      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-      const pStr=price>0?` \`${priceFlag(price)}\``:'';
-      const flag=countryFlag(ticker);
-      const link=n.url?` - [Link](<${n.url}>)`:'';
-      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${flag}${ioStr}${mcStr}`;
-      await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
-      console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
-    }
-    if(state.sentPRSpike.size>500){const a=[...state.sentPRSpike];state.sentPRSpike.clear();a.slice(-200).forEach(id=>state.sentPRSpike.add(id));}
-  }catch(e){console.error('checkPRSpike:',e.message);}
-}
-
-async function checkBreakingNews(){
-  if(!isActive()||!topGappers.length)return;
-  const etInfo=getETInfo();
-  const tickers=topGappers.map(g=>g.ticker).join(',');
-  try{
-    const news=await fmpGet(`/stable/news/stock?symbols=${tickers}&limit=50`);
-    if(!Array.isArray(news))return;
-    const cutoff=Date.now()-5*60*1000;
-    for(const n of news.slice(0,10)){
-      if(!n.publishedDate)continue;
-      const id=(n.url||n.title||'').slice(0,100);
-      if(new Date(n.publishedDate).getTime()<cutoff||state.sentNews.has(id))continue;
-      state.sentNews.add(id);
-      const ageSec=Math.floor((Date.now()-new Date(n.publishedDate).getTime())/1000);
-      const ageStr=ageSec<60?`${ageSec} seconds ago`:`${Math.floor(ageSec/60)} min ago`;
-      const ticker=n.symbol||n.symbols||'';
-      const title=(n.title||'').slice(0,200);
-      const link=n.url||'';
-      const isOff=/offering|shelf|ATM|dilut|direct offering|registered direct/i.test(title);
-      const color=isOff?0xf0a500:(n.sentiment||'').toLowerCase()==='positive'?0x39d353:(n.sentiment||'').toLowerCase()==='negative'?0xf85149:0x5865f2;
-      const gapper=topGappers.find(g=>g.ticker===ticker);
-      await post(WH.PRESS_RELEASES,{embeds:[{title:`${ticker} — ${ageStr}`,description:`${title}\n${link?`[Link](<${link}>)`:''}`,color,timestamp:new Date(n.publishedDate).toISOString()}]});
-      await sleep(300);
-      const px=gapper?` \`${priceFlag(gapper.price)}\` \`+${gapper.chgPct.toFixed(1)}%\``:' ';
-      const si2=(n.sentiment||'').toLowerCase()==='positive'?'📈':(n.sentiment||'').toLowerCase()==='negative'?'📉':'📰';
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` ${si2}${isOff?' ⚠️':''} **${ticker}**${px}${ageStr} — ${title.slice(0,90)}${link?` | [PR →](<${link}>)`:''}`});
-      await sleep(300);
-    }
-    if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(id=>state.sentNews.add(id));}
-  }catch(e){console.error('checkBreakingNews:',e.message);}
 }
 
 async function checkGreenBars(){
@@ -407,7 +281,7 @@ async function checkGreenBars(){
     try{
       const last=state.sentGreenBar.get(g.ticker)||0;
       if(Date.now()-last<15*60*1000)continue;
-      if(g.rvol<3||g.volume<25000)continue; // same quality bar as NHOD
+      if(g.rvol<3||g.volume<25000)continue;
       const now=new Date();
       const from=new Date(now-60*60*1000).toISOString().slice(0,10);
       const to=now.toISOString().slice(0,10);
@@ -433,15 +307,15 @@ async function checkSECFilings(){
   const cutoff=Date.now()-15*60*1000;
   for(const g of topGappers.slice(0,20)){
     try{
-      const filings=await fmpGet(`/stable/sec-filings?symbol=${g.ticker}&limit=5`);
-      if(!Array.isArray(filings))continue;
+      const r=await polyGet(`/vX/reference/filings?ticker=${g.ticker}&limit=5&order=desc&sort=filed_at`);
+      const filings=(r&&r.results)||[];
       for(const f of filings){
-        const filed=new Date(f.date||f.filledDate||f.acceptedDate||0).getTime();
-        const id=(f.link||f.url||f.title||'').slice(0,80);
+        const filed=new Date(f.filed_at||f.period_of_report_date||0).getTime();
+        const id=(f.filing_url||f.accession_number||'').slice(0,80);
         if(filed<=cutoff||state.sentFilings.has(id))continue;
         state.sentFilings.add(id);
-        const ft=(f.formType||f.type||'SEC').toUpperCase();
-        const lnk=f.link||f.url||'';
+        const ft=(f.form_type||'SEC').toUpperCase();
+        const lnk=f.filing_url||'';
         const isDil=/S-3|S-1|424B|ATM|DEFA14/.test(ft);
         const line=`\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${isDil?' ⚠️':''} — Form ${ft}${lnk?` — [Link](<${lnk}>)`:''}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
@@ -468,10 +342,71 @@ async function checkMorningSnapshot(){
   console.log(`[${etInfo.timeStr}] Morning snapshot posted`);
 }
 
+// News WebSocket handler — real-time PR Spike + PR Drop (replaces FMP polling)
+const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
+const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
+
+async function handleNewsEvent(n){
+  if(!isActive())return;
+  const etInfo=getETInfo();
+  const title=n.title||n.headline||'';
+  if(!title)return;
+  const tickers=(n.tickers||[n.sym||n.ticker||'']).filter(Boolean).map(t=>t.toUpperCase());
+  if(!tickers.length)return;
+  const url=n.article_url||n.url||'';
+  const id=(url||title).slice(0,100);
+  if(state.sentNews.has(id))return;
+  state.sentNews.add(id);
+  for(const t of tickers){if(url)state.recentNewsCache.set(t,{url,ts:Date.now()});}
+  const isDrop=DROP_RE.test(title);
+  const isSpike=!isDrop&&SPIKE_RE.test(title);
+  if(!isDrop&&!isSpike)return;
+  for(const ticker of tickers.slice(0,3)){
+    if(isEtf(ticker))continue;
+    if(isDrop){
+      const dropId=`prdrop_${id}_${ticker}`;
+      if(state.sentPRDrop.has(dropId))continue;
+      state.sentPRDrop.add(dropId);
+      const[snap,details]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
+      const td=snap&&snap.ticker;
+      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+      const mc=details.market_cap||0;
+      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+      const pStr=price>0?` \`${priceFlag(price)}\``:'';
+      const link=url?` - [Link](<${url}>)`:'';
+      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
+      await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});await sleep(300);
+      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});await sleep(300);
+      console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker}`);
+    }else{
+      const spikeId=`prspike_${id}_${ticker}`;
+      if(state.sentPRSpike.has(spikeId))continue;
+      state.sentPRSpike.add(spikeId);
+      const[snap,details]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
+      const td=snap&&snap.ticker;
+      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+      const mc=details.market_cap||0;
+      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+      const pStr=price>0?` \`${priceFlag(price)}\``:'';
+      const link=url?` - [Link](<${url}>)`:'';
+      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
+      await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
+      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
+      console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
+    }
+  }
+  if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(x=>state.sentNews.add(x));}
+  if(state.sentPRDrop.size>500){const a=[...state.sentPRDrop];state.sentPRDrop.clear();a.slice(-200).forEach(x=>state.sentPRDrop.add(x));}
+  if(state.sentPRSpike.size>500){const a=[...state.sentPRSpike];state.sentPRSpike.clear();a.slice(-200).forEach(x=>state.sentPRSpike.add(x));}
+}
+
 let ws=null;
-function connectWebSocket(){
+let wsNews=null;
+const subscribedTickers=new Set();
+
+function connectPriceWS(){
   if(ws){try{ws.terminate();}catch(e){}}
-  console.log('Connecting to Polygon WebSocket...');
+  console.log('Connecting to Polygon price WebSocket...');
   ws=new WebSocket('wss://socket.polygon.io/stocks');
   ws.on('open',()=>ws.send(JSON.stringify({action:'auth',params:POLY_KEY})));
   ws.on('message',data=>{
@@ -481,7 +416,7 @@ function connectWebSocket(){
           subscribedTickers.clear();
           const subs=topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
           if(subs){ws.send(JSON.stringify({action:'subscribe',params:subs}));topGappers.forEach(g=>subscribedTickers.add(g.ticker));}
-          console.log(`WebSocket subscribed to ${topGappers.length} tickers`);
+          console.log(`[Price WS] Subscribed to ${topGappers.length} tickers`);
         }
         if(msg.ev==='T'||msg.ev==='A'){
           const ticker=msg.sym;
@@ -499,17 +434,35 @@ function connectWebSocket(){
       }
     }catch(e){}
   });
-  ws.on('error',err=>console.error('WS error:',err.message));
-  ws.on('close',()=>{console.log('WS closed, reconnecting in 5s...');setTimeout(connectWebSocket,5000);});
+  ws.on('error',err=>console.error('Price WS error:',err.message));
+  ws.on('close',()=>{console.log('Price WS closed, reconnecting in 5s...');setTimeout(connectPriceWS,5000);});
 }
-// Track which tickers are currently subscribed so we can instantly sub new ones
-const subscribedTickers=new Set();
+
+function connectNewsWS(){
+  if(wsNews){try{wsNews.terminate();}catch(e){}}
+  console.log('Connecting to Polygon news WebSocket...');
+  wsNews=new WebSocket('wss://socket.polygon.io/news');
+  wsNews.on('open',()=>wsNews.send(JSON.stringify({action:'auth',params:POLY_KEY})));
+  wsNews.on('message',data=>{
+    try{
+      for(const msg of JSON.parse(data.toString())){
+        if(msg.ev==='status'&&msg.status==='auth_success'){
+          wsNews.send(JSON.stringify({action:'subscribe',params:'N.*'}));
+          console.log('[News WS] Subscribed to all news (N.*)');
+        }
+        if(msg.ev==='N')handleNewsEvent(msg).catch(()=>{});
+      }
+    }catch(e){}
+  });
+  wsNews.on('error',err=>console.error('News WS error:',err.message));
+  wsNews.on('close',()=>{console.log('News WS closed, reconnecting in 5s...');setTimeout(connectNewsWS,5000);});
+}
 
 function subscribeNewTickers(newTickers){
   if(!ws||ws.readyState!==WebSocket.OPEN||!newTickers.length)return;
   ws.send(JSON.stringify({action:'subscribe',params:newTickers.map(t=>`T.${t},A.${t}`).join(',')}));
   newTickers.forEach(t=>subscribedTickers.add(t));
-  console.log(`[WS] Subscribed to ${newTickers.length} new tickers: ${newTickers.join(', ')}`);
+  console.log(`[Price WS] New tickers: ${newTickers.join(', ')}`);
 }
 
 function resubscribeWS(){
@@ -521,26 +474,19 @@ function resubscribeWS(){
 }
 
 async function main(){
-  console.log('🤖 AziziBot v3 starting...');
+  console.log('🤖 AziziBot v4 starting — Polygon-only...');
   await refreshEtfList();
   await refreshTopGappers();
-  connectWebSocket();
+  connectPriceWS();
+  connectNewsWS();
 
-  // Fast loop: refresh gappers every 20s, instantly sub new tickers & fire PMH on discovery
   setInterval(async()=>{
     const before=new Set(topGappers.map(g=>g.ticker));
     await refreshEtfList();
     await refreshTopGappers();
-
-    // Find brand-new tickers that just appeared in topGappers
     const newlyDiscovered=topGappers.filter(g=>!before.has(g.ticker));
-
-    // Instantly subscribe new tickers to WebSocket — don't wait for next cycle
     const unsubbed=newlyDiscovered.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
     if(unsubbed.length)subscribeNewTickers(unsubbed);
-
-    // Fire PMH immediately for newly discovered tickers at their current high
-    // This catches WGRX-style gappers that we missed before subscribing
     for(const g of newlyDiscovered){
       const s=state.tickers.get(g.ticker);
       if(s&&g.price>=s.high*0.999)fireNHOD(g.ticker,g.price).catch(()=>{});
@@ -550,13 +496,11 @@ async function main(){
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
-    await checkPRDrop();
-    await checkPRSpike();
-    await checkBreakingNews();
     await checkGreenBars();
     await checkSECFilings();
   },60*1000);
-  console.log('🤖 AziziBot v3 running. Real-time alerts active.');
+
+  console.log('🤖 AziziBot v4 running. Price + News WebSockets active.');
 }
 
 main().catch(err=>{console.error('Fatal:',err);process.exit(1);});
