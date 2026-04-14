@@ -247,7 +247,8 @@ function isEtf(ticker){
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const state={
-  alertedGappers:new Set(),  // tickers we already fired a discovery alert for today
+  alertedGappers:new Set(),  // tickers alerted today
+  recentMovers:new Set(),     // tickers alerted this week
   sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),
   sentNews:new Set(),morningPosted:new Set(),
@@ -308,6 +309,7 @@ async function refreshTopGappers(){
 async function fireGapperAlert(g){
   if(state.alertedGappers.has(g.ticker))return;
   state.alertedGappers.add(g.ticker);
+  state.recentMovers.add(g.ticker);
   const etInfo=getETInfo();
   console.log(`[${etInfo.timeStr}] HOT GAPPER: ${g.ticker} +${g.chgPct.toFixed(1)}% RVol:${fmtRVol(g.rvol)}`);
 
@@ -436,12 +438,16 @@ async function checkEDGARFilings(){
         // 8-K: always alert if we have a ticker (can be catalyst BEFORE it gaps)
         // All other forms: only alert for current hot gappers or today's runners
         const is8K=/^8-K/.test(form);
-        const isHot=ticker&&(is8K||topGappers.some(g=>g.ticker===ticker)||state.alertedGappers.has(ticker));
-        if(!isHot){state.sentFilings.add(id);continue;}
+        const isKnownMover=ticker&&(topGappers.some(g=>g.ticker===ticker)||state.alertedGappers.has(ticker)||state.recentMovers.has(ticker));
+        if(!isKnownMover){state.sentFilings.add(id);continue;}
+        const snapF=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+        const tdF=snapF&&snapF.ticker;
+        const priceF=(tdF&&tdF.lastTrade&&tdF.lastTrade.p)||(tdF&&tdF.day&&tdF.day.c)||0;
+        if(priceF>20){state.sentFilings.add(id);continue;}
         state.sentFilings.add(id);
         const isDil=/S-3|S-1|424B/.test(form);
         const gapper=topGappers.find(g=>g.ticker===ticker);
-        const priceStr=gapper?` | $${gapper.price.toFixed(2)} \`+${gapper.chgPct.toFixed(1)}%\``:'';
+        const priceStr=priceF>0?` | $${priceF.toFixed(2)}`+(gapper?` \`+${gapper.chgPct.toFixed(1)}%\``:``):``;
         const line=`\`${etInfo.timeStr}\` **SEC/EDGAR** **${ticker}** ${isDil?'⚠️':''} — Form ${form}${link?` — [Link](<${link}>)`:''}${priceStr}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
         await post(WH.MAIN_CHAT,{content:line});
@@ -468,6 +474,8 @@ async function checkSECFilings(){
         const filed=new Date(f.filed_at||0).getTime();
         const id=(f.filing_url||f.accession_number||'').slice(0,80);
         if(filed<=cutoff||state.sentFilings.has(id))continue;
+        // Only alert for under $20 tickers we know about
+        if(g.price>20)continue;
         state.sentFilings.add(id);
         const ft=(f.form_type||'SEC').toUpperCase();
         const lnk=f.filing_url||'';
