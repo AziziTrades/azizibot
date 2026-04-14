@@ -135,7 +135,12 @@ async function refreshTopGappers(){
       const chg=lp>0&&prev>0?((lp-prev)/prev)*100:(t.todaysChangePerc||0);
       const vol=(t.day&&t.day.v)||(t.min&&t.min.av)||0;
       const pv2=(t.prevDay&&t.prevDay.v)||0;
-      return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol:pv2>0?vol/pv2:0,high:(t.day&&t.day.h)||lp};
+      // Time-normalized RVol: scale today's partial volume to a projected full-day equivalent
+      // Without this, pre-market RVol is always near 0 vs yesterday's full day
+      const minutesActive=Math.max(getETInfo().etMin-240,1); // minutes since 4AM pre-market open
+      const timeScale=Math.min(780/minutesActive,30);        // 780min = 4AM-7PM window; cap 30x
+      const rvol=pv2>0?(vol*timeScale)/pv2:0;
+      return{ticker:t.ticker,price:lp,prev,chgPct:chg,volume:vol,prevVol:pv2,rvol,high:(t.day&&t.day.h)||lp};
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
@@ -150,6 +155,8 @@ async function fireNHOD(ticker,price){
   const etInfo=getETInfo();
   const gapper=topGappers.find(g=>g.ticker===ticker);if(!gapper)return;
   const s=state.tickers.get(ticker);if(!s||price<=s.high+0.001)return;
+  // Minimum RVol gate — only alert on genuine unusual activity (mirrors NuntioBot)
+  if(gapper.rvol<2)return;
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod});
 
