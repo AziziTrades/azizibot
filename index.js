@@ -1,4 +1,4 @@
-// AziziBot v4 — Polygon-only, real-time news WebSocket
+// AziziBot v5 — Hot names only: one alert on discovery + PR/news alerts
 // Railway.app — Node.js 18+
 
 const https = require('https');
@@ -15,6 +15,7 @@ const WH = {
   MAIN_CHAT:      'https://discord.com/api/webhooks/1493201376484786217/Hv4PUUUVCVTa80ukQuR5pUc5wa5ZrXAfGtAdqa2KLoEN3WJ7h79hZiXzEMIzQ9-IfmRW'
 };
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function getETInfo() {
   const now = new Date();
   const p = new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'numeric',second:'numeric',hour12:false}).formatToParts(now);
@@ -58,7 +59,7 @@ async function post(webhook,payload){
   });
 }
 
-// Ticker details cache (market cap, type) — 1 hour TTL
+// ─── Polygon data helpers ─────────────────────────────────────────────────────
 const tickerCache=new Map();
 async function getTickerDetails(ticker){
   const c=tickerCache.get(ticker);
@@ -105,7 +106,7 @@ async function getShortInterest(ticker){
   return '--';
 }
 
-// ETF filter — Polygon ticker type
+// ─── ETF filter ───────────────────────────────────────────────────────────────
 let etfSet=new Set();
 let lastEtfRefresh=0;
 async function refreshEtfList(){
@@ -130,16 +131,26 @@ function isEtf(ticker){
   return false;
 }
 
+// ─── State ────────────────────────────────────────────────────────────────────
 const state={
-  tickers:new Map(),sentHalts:new Set(),sentResumes:new Set(),
+  alertedGappers:new Set(),  // tickers we already fired a discovery alert for today
+  sentHalts:new Set(),sentResumes:new Set(),
   sentFilings:new Set(),sentPRSpike:new Set(),sentPRDrop:new Set(),
-  sentNews:new Set(),sentGreenBar:new Map(),morningPosted:new Set(),
-  lastTrade:new Map(),priceHistory:new Map(),recentNewsCache:new Map(),
-  nhodCooldown:new Map(),lastAlertedPrice:new Map(),alertWindow:new Map()
+  sentNews:new Set(),morningPosted:new Set(),
+  recentNewsCache:new Map()
 };
 let topGappers=[];
 let lastFilingCheck=0;
 let lastHaltCheck=0;
+let lastNewsPoll=0;
+
+// ─── Hot Gapper Quality Bar ───────────────────────────────────────────────────
+// Strict thresholds — only genuinely hot names get through
+const MIN_RVOL   = 5;     // time-normalized RVol
+const MIN_VOL    = 100000; // absolute volume
+const MIN_CHG    = 10;    // minimum % gain
+const MAX_PRICE  = 20;
+const MIN_PRICE  = 0.10;
 
 async function refreshTopGappers(){
   try{
@@ -161,55 +172,54 @@ async function refreshTopGappers(){
     };
     const merge=new Map();
     for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
-    topGappers=[...merge.values()].filter(t=>t.chgPct>=5&&t.price>=0.1&&t.price<=20&&t.volume>=50000&&t.rvol>=1.5&&!isEtf(t.ticker)).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
-    for(const g of topGappers){const ex=state.tickers.get(g.ticker)||{high:0,nhod:0};state.tickers.set(g.ticker,{...ex,...g,high:Math.max(g.high,ex.high)});}
-    console.log(`[${getETInfo().timeStr}] ${topGappers.length} gappers`);
+    topGappers=[...merge.values()]
+      .filter(t=>
+        t.chgPct>=MIN_CHG &&
+        t.price>=MIN_PRICE &&
+        t.price<=MAX_PRICE &&
+        t.volume>=MIN_VOL &&
+        t.rvol>=MIN_RVOL &&
+        !isEtf(t.ticker)
+      )
+      .sort((a,b)=>b.chgPct-a.chgPct)
+      .slice(0,20); // top 20 only
+    console.log(`[${getETInfo().timeStr}] ${topGappers.length} hot gappers`);
   }catch(e){console.error('refreshTopGappers:',e.message);}
 }
 
-async function fireNHOD(ticker,price){
-  if(!isActive())return;
+// ─── Hot Gapper Discovery Alert — fires ONCE per ticker per session ───────────
+async function fireGapperAlert(g){
+  if(state.alertedGappers.has(g.ticker))return;
+  state.alertedGappers.add(g.ticker);
   const etInfo=getETInfo();
-  const gapper=topGappers.find(g=>g.ticker===ticker);if(!gapper)return;
-  const s=state.tickers.get(ticker);if(!s||price<=s.high+0.001)return;
-  if(gapper.rvol<3)return;
-  if(gapper.volume<25000)return;
-  const lastAlerted=state.lastAlertedPrice.get(ticker)||0;
-  if(lastAlerted>0&&price<lastAlerted*1.10)return;
-  const nhod=(s.nhod||0)+1;
-  state.tickers.set(ticker,{...s,high:price,nhod});
-  const last=state.nhodCooldown.get(ticker)||0;
-  if(Date.now()-last<15*60*1000)return;
-  state.nhodCooldown.set(ticker,Date.now());
-  const now15=Date.now();
-  const times=(state.alertWindow.get(ticker)||[]).filter(t=>now15-t<15*60*1000);
-  if(times.length>=3)return;
-  times.push(now15);
-  state.alertWindow.set(ticker,times);
-  state.lastAlertedPrice.set(ticker,price);
-  console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(2)} x${nhod}`);
-  const[newsUrl,rs,details,si]=await Promise.all([getLatestNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getShortInterest(ticker)]);
+  console.log(`[${etInfo.timeStr}] HOT GAPPER: ${g.ticker} +${g.chgPct.toFixed(1)}% RVol:${fmtRVol(g.rvol)}`);
+
+  const[newsUrl,rs,details,si]=await Promise.all([
+    getLatestNewsUrl(g.ticker),
+    getRecentSplit(g.ticker),
+    getTickerDetails(g.ticker),
+    getShortInterest(g.ticker)
+  ]);
+
   const mc=details.market_cap||0;
   const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
   const siStr=si!=='--'?` | SI: ${si}`:'';
   const rsStr=rs?` | ${rs}`:'';
-  let afterLull='';
-  const hist=state.priceHistory.get(ticker)||[];
-  if(hist.length>=10){
-    const old=hist.filter(h=>h.time<Date.now()-10*60*1000);
-    if(old.length>=3){const oH=Math.max(...old.map(h=>h.price)),oL=Math.min(...old.map(h=>h.price));if((oH-oL)/oL<0.02&&price>oH*1.03)afterLull=' · `after-lull`';}
-  }
-  let prInline='';
-  const recentNews=state.recentNewsCache.get(ticker);
-  if(recentNews&&(Date.now()-recentNews.ts)<60*60*1000)prInline=` | [PR+](<${recentNews.url}>)`;
-  const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
   const sess=etInfo.sess;
-  const label=nhod===1?(sess==='AFTER-HOURS'?'AHs':sess==='PRE-MARKET'?'PMH':'NSH'):`${nhod} NHOD`;
-  const flag=countryFlag(ticker);
-  const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${siStr}${rsStr}${prInline}`;
+  const sessLabel=sess==='PRE-MARKET'?'PM':sess==='AFTER-HOURS'?'AH':'';
+  const tLink=newsUrl?`[${g.ticker}](<${newsUrl}>)`:`**${g.ticker}**`;
+  const flag=countryFlag(g.ticker);
+
+  // Check if there's a recent PR driving it
+  const cached=state.recentNewsCache.get(g.ticker);
+  const prStr=cached&&(Date.now()-cached.ts)<60*60*1000?` | [PR+](<${cached.url}>)`:'';
+
+  const line=`\`${etInfo.timeStr}\` 🔥 ${tLink} \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\`${sessLabel?' `'+sessLabel+'`':''} ~ ${flag}${mcStr} | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${siStr}${rsStr}${prStr}`;
   await post(WH.MAIN_CHAT,{content:line});
+  await post(WH.TOP_GAPPERS,{content:line});
 }
 
+// ─── Halts ────────────────────────────────────────────────────────────────────
 async function checkHalts(){
   if(!isActive())return;
   if(Date.now()-lastHaltCheck<60*1000)return;
@@ -274,43 +284,19 @@ async function checkHalts(){
   }
 }
 
-async function checkGreenBars(){
-  if(!isActive()||!topGappers.length)return;
-  const etInfo=getETInfo();
-  for(const g of topGappers.slice(0,20)){
-    try{
-      const last=state.sentGreenBar.get(g.ticker)||0;
-      if(Date.now()-last<15*60*1000)continue;
-      if(g.rvol<3||g.volume<25000)continue;
-      const now=new Date();
-      const from=new Date(now-60*60*1000).toISOString().slice(0,10);
-      const to=now.toISOString().slice(0,10);
-      const aggs=await polyGet(`/v2/aggs/ticker/${g.ticker}/range/5/minute/${from}/${to}?adjusted=true&sort=desc&limit=10`);
-      if(!aggs||!aggs.results||aggs.results.length<3)continue;
-      let gc=0;for(const b of aggs.results){if(b.c>b.o)gc++;else break;}
-      if(gc<3)continue;
-      state.sentGreenBar.set(g.ticker,Date.now());
-      const newsUrl=await getLatestNewsUrl(g.ticker);
-      const tLink=newsUrl?`[${g.ticker}](<${newsUrl}>)`:`**${g.ticker}**`;
-      const line=`\`${etInfo.timeStr}\` ↗ ${tLink} \`${priceFlag(g.price)}\` · ${gc}${gc>=5?' 🔥':''} green bars 5m ~ ${countryFlag(g.ticker)} | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)} | $${g.price.toFixed(2)} \`+${g.chgPct.toFixed(1)}%\``;
-      await post(WH.MAIN_CHAT,{content:line});
-      console.log(`[${etInfo.timeStr}] GREEN BARS: ${g.ticker} ${gc}x`);
-    }catch(e){}
-  }
-}
-
+// ─── SEC Filings ──────────────────────────────────────────────────────────────
 async function checkSECFilings(){
   if(!isActive()||!topGappers.length)return;
   if(Date.now()-lastFilingCheck<2*60*1000)return;
   lastFilingCheck=Date.now();
   const etInfo=getETInfo();
   const cutoff=Date.now()-15*60*1000;
-  for(const g of topGappers.slice(0,20)){
+  for(const g of topGappers){
     try{
       const r=await polyGet(`/vX/reference/filings?ticker=${g.ticker}&limit=5&order=desc&sort=filed_at`);
       const filings=(r&&r.results)||[];
       for(const f of filings){
-        const filed=new Date(f.filed_at||f.period_of_report_date||0).getTime();
+        const filed=new Date(f.filed_at||0).getTime();
         const id=(f.filing_url||f.accession_number||'').slice(0,80);
         if(filed<=cutoff||state.sentFilings.has(id))continue;
         state.sentFilings.add(id);
@@ -327,6 +313,7 @@ async function checkSECFilings(){
   }
 }
 
+// ─── Morning Snapshot ─────────────────────────────────────────────────────────
 async function checkMorningSnapshot(){
   const etInfo=getETInfo();
   if((etInfo.h!==6&&etInfo.h!==7)||etInfo.m!==0)return;
@@ -334,20 +321,19 @@ async function checkMorningSnapshot(){
   if(state.morningPosted.has(key))return;
   state.morningPosted.add(key);
   if(!topGappers.length)return;
-  let adv='--',dec='--',unch='--';
-  try{const snap=await polyGet('/v2/snapshot/locale/us/markets/stocks/gainers?include_otc=true');const tks=(snap&&snap.tickers)||[];const a=tks.filter(t=>(t.todaysChangePerc||0)>0.1).length;const d=tks.filter(t=>(t.todaysChangePerc||0)<-0.1).length;adv=a;dec=d;unch=tks.length-a-d;}catch(e){}
   let rows='';
-  topGappers.forEach(g=>{const dot=g.chgPct>=200?'🔴':g.chgPct>=100?'🟠':g.chgPct>=50?'🟡':'🟢';rows+=`${dot} **${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | RVol: ${fmtRVol(g.rvol)}\n`;});
-  await post(WH.TOP_GAPPERS,{content:`# ${etInfo.h===6?'🌅 6AM':'☀️ 7AM'} Pre-Market Scan`,embeds:[{title:`📊 Top ${topGappers.length} Gappers ($0.10–$20)`,description:rows||'No data',color:0x00d4ff,fields:[{name:'Market Breadth',value:`🟢 ADV: ${adv}  🔴 DEC: ${dec}  ⚪ UNCH: ${unch}`,inline:false}],footer:{text:`AziziBot · ${etInfo.timeStr} ET · Polygon.io`},timestamp:new Date().toISOString()}]});
+  topGappers.forEach(g=>{
+    const dot=g.chgPct>=200?'🔴':g.chgPct>=100?'🟠':g.chgPct>=50?'🟡':'🟢';
+    rows+=`${dot} **${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | $${g.price.toFixed(2)} | Vol: ${fmtN(g.volume)} | RVol: ${fmtRVol(g.rvol)}\n`;
+  });
+  await post(WH.TOP_GAPPERS,{embeds:[{title:`📊 ${etInfo.h===6?'🌅 6AM':'☀️ 7AM'} Hot Gappers`,description:rows||'No data',color:0x00d4ff,footer:{text:`AziziBot · ${etInfo.timeStr} ET`},timestamp:new Date().toISOString()}]});
   console.log(`[${etInfo.timeStr}] Morning snapshot posted`);
 }
 
-// News constants — used by both REST polling and any future WS upgrade
+// ─── News polling — PR Spike + PR Drop ───────────────────────────────────────
 const DROP_RE=/offering|public offering|convertible|shelf registration|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|subordinated notes|debenture|equity financ/i;
 const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
 
-// Poll Polygon REST news every 30s — fallback since news WS requires Business plan
-let lastNewsPoll=0;
 async function pollNews(){
   if(!isActive())return;
   if(Date.now()-lastNewsPoll<30*1000)return;
@@ -355,73 +341,73 @@ async function pollNews(){
   try{
     const r=await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
     const items=(r&&r.results)||[];
-    const cutoff=Date.now()-3*60*1000; // only process news from last 3 min
+    const cutoff=Date.now()-3*60*1000;
     for(const n of items){
       if(!n.published_utc||new Date(n.published_utc).getTime()<cutoff)continue;
-      await handleNewsEvent({
-        title:n.title,
-        tickers:n.tickers||[],
-        article_url:n.article_url||'',
-        published_utc:n.published_utc
-      });
+      const title=n.title||'';
+      const tickers=(n.tickers||[]).filter(Boolean).map(t=>t.toUpperCase());
+      if(!tickers.length)continue;
+      const url=n.article_url||'';
+      const id=(url||title).slice(0,100);
+      if(state.sentNews.has(id))continue;
+      state.sentNews.add(id);
+
+      // Cache for gapper discovery alerts
+      for(const t of tickers){if(url)state.recentNewsCache.set(t,{url,ts:Date.now()});}
+
+      const isDrop=DROP_RE.test(title);
+      const isSpike=!isDrop&&SPIKE_RE.test(title);
+      if(!isDrop&&!isSpike)continue;
+
+      const etInfo=getETInfo();
+      for(const ticker of tickers.slice(0,3)){
+        if(isEtf(ticker))continue;
+        if(isDrop){
+          const dropId=`prdrop_${id}_${ticker}`;
+          if(state.sentPRDrop.has(dropId))continue;
+          state.sentPRDrop.add(dropId);
+          const[snap,details]=await Promise.all([
+            polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+            getTickerDetails(ticker)
+          ]);
+          const td=snap&&snap.ticker;
+          const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+          const mc=details.market_cap||0;
+          const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+          const pStr=price>0?` \`${priceFlag(price)}\``:'';
+          const link=url?` - [Link](<${url}>)`:'';
+          const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
+          await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});await sleep(300);
+          await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});await sleep(300);
+          console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker}`);
+        }else{
+          const spikeId=`prspike_${id}_${ticker}`;
+          if(state.sentPRSpike.has(spikeId))continue;
+          state.sentPRSpike.add(spikeId);
+          const[snap,details]=await Promise.all([
+            polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+            getTickerDetails(ticker)
+          ]);
+          const td=snap&&snap.ticker;
+          const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+          const mc=details.market_cap||0;
+          const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+          const pStr=price>0?` \`${priceFlag(price)}\``:'';
+          const link=url?` - [Link](<${url}>)`:'';
+          const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
+          await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
+          await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
+          console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
+        }
+      }
     }
+    if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(x=>state.sentNews.add(x));}
+    if(state.sentPRDrop.size>500){const a=[...state.sentPRDrop];state.sentPRDrop.clear();a.slice(-200).forEach(x=>state.sentPRDrop.add(x));}
+    if(state.sentPRSpike.size>500){const a=[...state.sentPRSpike];state.sentPRSpike.clear();a.slice(-200).forEach(x=>state.sentPRSpike.add(x));}
   }catch(e){console.error('pollNews:',e.message);}
 }
 
-async function handleNewsEvent(n){
-  if(!isActive())return;
-  const etInfo=getETInfo();
-  const title=n.title||n.headline||'';
-  if(!title)return;
-  const tickers=(n.tickers||[n.sym||n.ticker||'']).filter(Boolean).map(t=>t.toUpperCase());
-  if(!tickers.length)return;
-  const url=n.article_url||n.url||'';
-  const id=(url||title).slice(0,100);
-  if(state.sentNews.has(id))return;
-  state.sentNews.add(id);
-  for(const t of tickers){if(url)state.recentNewsCache.set(t,{url,ts:Date.now()});}
-  const isDrop=DROP_RE.test(title);
-  const isSpike=!isDrop&&SPIKE_RE.test(title);
-  if(!isDrop&&!isSpike)return;
-  for(const ticker of tickers.slice(0,3)){
-    if(isEtf(ticker))continue;
-    if(isDrop){
-      const dropId=`prdrop_${id}_${ticker}`;
-      if(state.sentPRDrop.has(dropId))continue;
-      state.sentPRDrop.add(dropId);
-      const[snap,details]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
-      const td=snap&&snap.ticker;
-      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-      const mc=details.market_cap||0;
-      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-      const pStr=price>0?` \`${priceFlag(price)}\``:'';
-      const link=url?` - [Link](<${url}>)`:'';
-      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
-      await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});await sleep(300);
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});await sleep(300);
-      console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker}`);
-    }else{
-      const spikeId=`prspike_${id}_${ticker}`;
-      if(state.sentPRSpike.has(spikeId))continue;
-      state.sentPRSpike.add(spikeId);
-      const[snap,details]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
-      const td=snap&&snap.ticker;
-      const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-      const mc=details.market_cap||0;
-      const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-      const pStr=price>0?` \`${priceFlag(price)}\``:'';
-      const link=url?` - [Link](<${url}>)`:'';
-      const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${link} ~ ${countryFlag(ticker)}${mcStr}`;
-      await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
-      await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
-      console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
-    }
-  }
-  if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(x=>state.sentNews.add(x));}
-  if(state.sentPRDrop.size>500){const a=[...state.sentPRDrop];state.sentPRDrop.clear();a.slice(-200).forEach(x=>state.sentPRDrop.add(x));}
-  if(state.sentPRSpike.size>500){const a=[...state.sentPRSpike];state.sentPRSpike.clear();a.slice(-200).forEach(x=>state.sentPRSpike.add(x));}
-}
-
+// ─── WebSocket ────────────────────────────────────────────────────────────────
 let ws=null;
 const subscribedTickers=new Set();
 
@@ -435,23 +421,11 @@ function connectPriceWS(){
       for(const msg of JSON.parse(data.toString())){
         if(msg.ev==='status'&&msg.status==='auth_success'){
           subscribedTickers.clear();
-          const subs=topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
+          const subs=topGappers.map(g=>`T.${g.ticker}`).join(',');
           if(subs){ws.send(JSON.stringify({action:'subscribe',params:subs}));topGappers.forEach(g=>subscribedTickers.add(g.ticker));}
           console.log(`[Price WS] Subscribed to ${topGappers.length} tickers`);
         }
-        if(msg.ev==='T'||msg.ev==='A'){
-          const ticker=msg.sym;
-          const price=msg.ev==='T'?msg.p:(msg.c||msg.h||0);
-          const ts=msg.ev==='T'?(msg.t||Date.now()):(msg.e||Date.now());
-          if(!price)continue;
-          state.lastTrade.set(ticker,ts);
-          if(!state.priceHistory.has(ticker))state.priceHistory.set(ticker,[]);
-          const hist=state.priceHistory.get(ticker);
-          hist.push({price,time:Date.now()});
-          if(hist.length>60)hist.shift();
-          const s=state.tickers.get(ticker);
-          if(s&&price>s.high+0.001)fireNHOD(ticker,price).catch(()=>{});
-        }
+        // Price WS now only used to keep topGappers data fresh — no per-tick alerts
       }
     }catch(e){}
   });
@@ -459,51 +433,46 @@ function connectPriceWS(){
   ws.on('close',()=>{console.log('Price WS closed, reconnecting in 5s...');setTimeout(connectPriceWS,5000);});
 }
 
-
 function subscribeNewTickers(newTickers){
   if(!ws||ws.readyState!==WebSocket.OPEN||!newTickers.length)return;
-  ws.send(JSON.stringify({action:'subscribe',params:newTickers.map(t=>`T.${t},A.${t}`).join(',')}));
+  ws.send(JSON.stringify({action:'subscribe',params:newTickers.map(t=>`T.${t}`).join(',')}));
   newTickers.forEach(t=>subscribedTickers.add(t));
-  console.log(`[Price WS] New tickers: ${newTickers.join(', ')}`);
 }
 
-function resubscribeWS(){
-  if(ws&&ws.readyState===WebSocket.OPEN&&topGappers.length){
-    const subs=topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
-    ws.send(JSON.stringify({action:'subscribe',params:subs}));
-    topGappers.forEach(g=>subscribedTickers.add(g.ticker));
-  }
-}
-
+// ─── Main ─────────────────────────────────────────────────────────────────────
 async function main(){
-  console.log('🤖 AziziBot v4 starting — Polygon-only...');
+  console.log('🤖 AziziBot v5 starting — hot names + news only...');
   await refreshEtfList();
   await refreshTopGappers();
   connectPriceWS();
 
+  // Fast loop every 20s — discover new hot gappers, fire once on entry
   setInterval(async()=>{
     const before=new Set(topGappers.map(g=>g.ticker));
     await refreshEtfList();
     await refreshTopGappers();
-    const newlyDiscovered=topGappers.filter(g=>!before.has(g.ticker));
-    const unsubbed=newlyDiscovered.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
+
+    // Fire ONE alert per newly discovered hot gapper
+    const newlyHot=topGappers.filter(g=>!before.has(g.ticker));
+    const unsubbed=newlyHot.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
     if(unsubbed.length)subscribeNewTickers(unsubbed);
-    await pollNews();
-    for(const g of newlyDiscovered){
-      const s=state.tickers.get(g.ticker);
-      if(s&&g.price>=s.high*0.999)fireNHOD(g.ticker,g.price).catch(()=>{});
+    for(const g of newlyHot){
+      await fireGapperAlert(g);
+      await sleep(500);
     }
+
+    // Poll news every 30s
+    await pollNews();
   },20*1000);
 
+  // Slow loop every 60s — halts, SEC filings, morning snapshot
   setInterval(async()=>{
     await checkMorningSnapshot();
     await checkHalts();
-    await pollNews();
-    await checkGreenBars();
     await checkSECFilings();
   },60*1000);
 
-  console.log('🤖 AziziBot v4 running. Price + News WebSockets active.');
+  console.log('🤖 AziziBot v5 running. Hot names + news alerts active.');
 }
 
 main().catch(err=>{console.error('Fatal:',err);process.exit(1);});
