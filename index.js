@@ -254,17 +254,34 @@ async function fireNHOD(ticker,price){
   const s=state.tickers.get(ticker);
   if(!s||price<=s.high+0.001)return;
 
-  // ── Hard quality gates (NuntioBot bar) ──────────────────────────────────
-  if(gapper.rvol<5)return;          // real unusual volume only
-  if(gapper.volume<50000)return;    // min volume
-  if(gapper.chgPct<5)return;        // still a gapper
+  // ── Session-based quality gates ─────────────────────────────────────────
+  const{etMin}=getETInfo();
+  // 4:00AM–6:00AM ET  (etMin 240–360): early pre-market
+  // 6:00AM–4:00PM ET  (etMin 360–960): main session (includes regular PM scan)
+  // 4:00PM–8:00PM ET  (etMin 960–1200): after-hours
+  if(etMin>=240&&etMin<360){
+    // Early pre-market 4AM–6AM
+    if(gapper.chgPct<10)return;
+    if(gapper.volume<100000)return;
+    if(gapper.rvol<3)return;
+  }else if(etMin>=360&&etMin<960){
+    // Main session 6AM–4PM
+    if(gapper.chgPct<20)return;
+    if(gapper.volume<1000000)return;
+    if(gapper.rvol<5)return;
+  }else{
+    // After-hours 4PM–8PM
+    if(gapper.chgPct<10)return;
+    if(gapper.volume<100000)return;
+    if(gapper.rvol<3)return;
+  }
 
-  // Must be 10% above last alerted price (prevents tick spam)
+  // Must be 10% above last alerted price — no tick-by-tick spam
   if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.10)return;
 
   // 15-min cooldown per ticker
   if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<15*60*1000)return;
-  // ────────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
 
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now()});
@@ -300,8 +317,8 @@ async function fireNHOD(ticker,price){
   const cached=state.recentNewsCache.get(ticker);
   const prStr=cached&&(Date.now()-cached.ts)<60*60*1000?` | [PR+](<${cached.url}>)`:'';
 
-  const sess=etInfo.sess;
-  const label=nhod===1?(sess==='PRE-MARKET'?'PMH':sess==='AFTER-HOURS'?'AHs':'NSH'):`${nhod} NHOD`;
+  const sessLabel=etInfo.sess;
+  const label=nhod===1?(sessLabel==='PRE-MARKET'?'PMH':sessLabel==='AFTER-HOURS'?'AHs':'NSH'):`${nhod} NHOD`;
   const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
   const flag=countryFlag(ticker);
   const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
