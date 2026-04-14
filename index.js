@@ -532,10 +532,12 @@ async function scanExtendedHours(){
       if(!price||!prev)continue;
       if((Date.now()-lastTs)/60000>30)continue; // trade must be within last 30 min
       const chgPct=((price-prev)/prev)*100;
-      if(Math.abs(chgPct)<5)continue;
+      if(chgPct<5)continue;          // gainers only — no negative movers
       const vol=(td.day&&td.day.v)||0;
       const pv2=(td.prevDay&&td.prevDay.v)||0;
       const rvol=pv2>0?(vol*timeScale)/pv2:0;
+      if(rvol<2)continue;            // min 2x RVol even in AH
+      if(vol<50000)continue;         // min 50K volume
       if(price>MAX_PRICE||price<MIN_PRICE)continue;
       const g={ticker,price,prev,chgPct,volume:vol,prevVol:pv2,rvol,high:price};
       await fireGapperAlert(g);
