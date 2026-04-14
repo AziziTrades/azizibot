@@ -344,13 +344,16 @@ async function checkEDGARFilings(){
         const cikMatch=link.match(/\/data\/(\d+)\//);
         const cik=cikMatch?cikMatch[1]:'';
         const ticker=cik?await getTickerFromCIK(cik):'';
+        // Only alert if ticker is a current hot gapper OR was alerted today as a runner
+        const isHot=ticker&&(topGappers.some(g=>g.ticker===ticker)||state.alertedGappers.has(ticker));
+        if(!isHot){state.sentFilings.add(id);continue;}
         state.sentFilings.add(id);
         const isDil=/S-3|S-1|424B/.test(form);
         const gapper=topGappers.find(g=>g.ticker===ticker);
         const priceStr=gapper?` | $${gapper.price.toFixed(2)} \`+${gapper.chgPct.toFixed(1)}%\``:'';
-        const line=`\`${etInfo.timeStr}\` **SEC/EDGAR**${ticker?' **'+ticker+'**':''} ${isDil?'⚠️':''} — Form ${form}${link?` — [Link](<${link}>)`:''}${priceStr}`;
+        const line=`\`${etInfo.timeStr}\` **SEC/EDGAR** **${ticker}** ${isDil?'⚠️':''} — Form ${form}${link?` — [Link](<${link}>)`:''}${priceStr}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
-        if(gapper||isDil)await post(WH.MAIN_CHAT,{content:line});
+        await post(WH.MAIN_CHAT,{content:line});
         console.log(`[${etInfo.timeStr}] EDGAR: ${form} ${ticker}`);
         await sleep(300);
       }
