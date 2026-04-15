@@ -669,6 +669,12 @@ function connectPriceWS(){
           if(!price)continue;
           const s=state.tickers.get(ticker);
           if(!s)continue;
+          // Hard pre-filter at WS level — reject junk before fireNHOD even runs
+          const g=topGappers.find(g=>g.ticker===ticker);
+          if(!g)continue;
+          if(g.volume<100000)continue;  // must have 100K+ volume
+          if(g.price>5)continue;        // must be under $5
+          if(g.chgPct<5)continue;       // must be gapping up
           // Update price history
           if(!s.priceHistory)s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
