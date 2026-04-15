@@ -45,7 +45,17 @@ function countryFlag(t){
 }
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 function isOTC(ticker){
-  return(/^[A-Z]{5}$/.test(ticker)&&/[FQEX]$/.test(ticker))||ticker.includes('.');
+  // 5-letter OTC suffixes: F=foreign, Q=bankruptcy, E=delinquent, X=mutual fund
+  if(/^[A-Z]{5}$/.test(ticker)&&/[FQEX]$/.test(ticker))return true;
+  // Warrants: ticker ending in W or WS (e.g. RGTIW, SLAPW)
+  if(/W$|WS$/.test(ticker))return true;
+  // Rights: ticker ending in R (e.g. ACMCR)
+  if(/^[A-Z]{4,5}R$/.test(ticker))return true;
+  // Units: ticker ending in U (e.g. IPAXU)
+  if(/^[A-Z]{4,5}U$/.test(ticker))return true;
+  // Contains dot (e.g. BRK.A)
+  if(ticker.includes('.'))return true;
+  return false;
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -238,7 +248,7 @@ async function refreshTopGappers(){
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
       t.chgPct>=5&&t.price>=0.1&&t.price<=5&&
-      t.volume>=50000&&!t.isOTCEx&&!isBadTicker(t.ticker)
+      t.volume>=100000&&!t.isOTCEx&&!isBadTicker(t.ticker)
     ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
     // Sync state.tickers
     for(const g of topGappers){
@@ -485,9 +495,10 @@ async function pollNews(){
         const snapVol=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
         const tdVol=snapVol&&snapVol.ticker;
         const volCheck=(tdVol&&tdVol.day&&tdVol.day.v)||0;
+        const prevVolCheck=(tdVol&&tdVol.prevDay&&tdVol.prevDay.v)||0;
         const priceCheck=(tdVol&&tdVol.lastTrade&&tdVol.lastTrade.p)||(tdVol&&tdVol.day&&tdVol.day.c)||0;
-        if(volCheck<100000)continue;   // min 100K volume for any news alert
-        if(priceCheck>20)continue;     // max $20 price
+        if(volCheck<100000)continue;        // hard rule: min 100K volume, no exceptions
+        if(priceCheck>20||priceCheck<0.10)continue; // price $0.10–$20
         const dedupId=isDrop?`prdrop_${id}_${ticker}`:`prspike_${id}_${ticker}`;
         const dedupSet=isDrop?state.sentPRDrop:state.sentPRSpike;
         if(dedupSet.has(dedupId))continue;
