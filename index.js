@@ -297,10 +297,10 @@ async function fireNHOD(ticker,price){
   }
 
   // 3. Must be 20% above last alerted price — no tick spam
-  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.20)return;
+  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.075)return; // 7.5% above last alert
 
-  // 4. 30-min cooldown per ticker
-  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<30*60*1000)return;
+  // 4. 5-min cooldown per ticker
+  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<5*60*1000)return;
 
   // 5. Max 3 alerts per ticker per day
   const dayCount=(state.dailyAlertCount.get(ticker)||0);
