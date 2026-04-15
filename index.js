@@ -84,7 +84,6 @@ async function postToWebhook(url, payload) {
 }
 async function post(payload) {
   payload.username = 'AziziBot';
-  await postToWebhook(TOP_GAPPERS_WH, payload);
   await postToWebhook(MAIN_CHAT_WH, payload);
 }
 function discordRest(method, path, body=null) {
