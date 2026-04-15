@@ -10,6 +10,7 @@ const APP_ID        = '1493671812247322624';
 
 // ALL alerts go to TOP_GAPPERS only
 const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57UTSPu2KfLmYNBRVPvPQIa4cSfCQA8wVcqB5d0J8cWYaJf5hlsm1EuRkQ3lolChTNh3';
+const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
 // ─── Session rules ────────────────────────────────────────────────────────────
 // 4:00–7:00 AM ET  → 10% gain, 100K vol
@@ -68,11 +69,10 @@ function polyGet(path) {
   const sep = path.includes('?') ? '&' : '?';
   return jsonGet(`https://api.polygon.io${path}${sep}apiKey=${POLY_KEY}`);
 }
-async function post(payload) {
-  payload.username = 'AziziBot';
+async function postToWebhook(url, payload) {
   return new Promise(resolve => {
     const body = JSON.stringify(payload);
-    const u = new URL(TOP_GAPPERS_WH);
+    const u = new URL(url);
     const req = https.request({
       hostname:u.hostname, path:u.pathname+u.search, method:'POST',
       headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}
@@ -81,6 +81,11 @@ async function post(payload) {
     req.setTimeout(5000, ()=>{ req.destroy(); resolve(0); });
     req.write(body); req.end();
   });
+}
+async function post(payload) {
+  payload.username = 'AziziBot';
+  await postToWebhook(TOP_GAPPERS_WH, payload);
+  await postToWebhook(MAIN_CHAT_WH, payload);
 }
 function discordRest(method, path, body=null) {
   return new Promise((resolve, reject) => {
@@ -546,7 +551,7 @@ function connectPriceWS() {
           // Debounce: once per 2s per ticker
           if(price > s.high+0.001) {
             const last = wsDebounce.get(ticker)||0;
-            if(Date.now()-last > 2000) {
+            if(Date.now()-last > 10000) { // 10s min between checks per ticker
               wsDebounce.set(ticker, Date.now());
               fireNHOD(ticker, price).catch(()=>{});
             }
