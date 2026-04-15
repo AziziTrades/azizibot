@@ -8,14 +8,17 @@ const BZ_KEY        = process.env.BZ_KEY        || '';
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN || '';
 const APP_ID        = '1493671812247322624';
 
-// ALL alerts go to TOP_GAPPERS only
+// ALL alerts go to MAIN_CHAT_WH
 const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57UTSPu2KfLmYNBRVPvPQIa4cSfCQA8wVcqB5d0J8cWYaJf5hlsm1EuRkQ3lolChTNh3';
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
 // ─── Session rules ────────────────────────────────────────────────────────────
-// 4:00–7:00 AM ET  → 10% gain, 100K vol
-// 7:00 AM–4:00 PM  → 20% gain, 1M vol
-// 4:00–8:00 PM ET  → 10% gain, 100K vol
+// Standard tier  (price $0.10–$10):
+//   4:00–7:00 AM ET  → 10% gain, 100K vol
+//   7:00 AM–4:00 PM  → 15% gain, 1M vol
+//   4:00–8:00 PM ET  → 10% gain, 100K vol
+// Hot mover tier (price $0.10–$200):
+//   Any session      → 50% gain, 5M vol
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
@@ -37,7 +40,7 @@ function isActive()  { return getET().etMin >= 240 && getET().etMin < 1200; }
 function sleep(ms)   { return new Promise(r => setTimeout(r, ms)); }
 function fmtN(n)     { if(!n||isNaN(n))return'--'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'K'; return String(n); }
 function fmtRVol(r)  { if(!r||isNaN(r)||r===0)return'--'; if(r>=1000)return Math.round(r).toLocaleString()+'x'; if(r>=10)return r.toFixed(0)+'x'; return r.toFixed(1)+'x'; }
-function priceFlag(p){ if(p<0.50)return'<$.50c'; if(p<1)return'<$1'; if(p<2)return'<$2'; if(p<5)return'<$5'; return'<$10'; }
+function priceFlag(p){ if(p<0.50)return'<$.50c'; if(p<1)return'<$1'; if(p<2)return'<$2'; if(p<5)return'<$5'; if(p<10)return'<$10'; if(p<15)return'<$15'; if(p<25)return'<$25'; if(p<50)return'<$50'; if(p<100)return'<$100'; return'<$200'; }
 function flag(ticker){
   const c = countryMap.get(ticker);
   if(c==='IL')return'🇮🇱'; if(c==='CN')return'🇨🇳'; if(c==='GB')return'🇬🇧'; if(c==='CA')return'🇨🇦';
@@ -214,6 +217,7 @@ async function getGreenBars(ticker) {
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let topGappers = [];
+let hotMovers  = []; // ≥50% gain, ≥5M vol, price $0.10–$200
 const state = {
   tickers:      new Map(),    // ticker → {high, nhod, lastAlertPrice, lastAlertTime, priceHistory}
   dailyCounts:  new Map(),    // ticker → alert count today
@@ -224,7 +228,7 @@ const state = {
 };
 const wsDebounce = new Map(); // ticker → last fireNHOD attempt ms
 
-// ─── Top Gappers refresh ──────────────────────────────────────────────────────
+// ─── Top Gappers + Hot Movers refresh ────────────────────────────────────────
 async function refreshGappers() {
   try {
     const { etMin } = getET();
@@ -254,6 +258,7 @@ async function refreshGappers() {
       for(const t of ((src&&src.tickers)||[]))
         if(t.ticker && !merge.has(t.ticker)) merge.set(t.ticker, build(t));
 
+    // Standard tier: $0.10–$10, ≥5% gain, ≥100K vol
     const newGappers = [...merge.values()].filter(t =>
       t.chgPct >= 5 &&
       t.price  >= 0.10 &&
@@ -266,19 +271,36 @@ async function refreshGappers() {
 
     topGappers = newGappers;
 
-    // Sync state.tickers
-    for(const g of topGappers) {
+    // Hot mover tier: $0.10–$200, ≥50% gain, ≥5M vol, not already in topGappers
+    const newHotMovers = [...merge.values()].filter(t =>
+      t.chgPct  >= 50 &&
+      t.price   >= 0.10 &&
+      t.price   <= 200 &&
+      t.volume  >= 5_000_000 &&
+      !t.isOTC &&
+      !isEtf(t.ticker) &&
+      !isBadTicker(t.ticker) &&
+      !topGappers.find(g => g.ticker === t.ticker)
+    ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,20);
+
+    hotMovers = newHotMovers;
+
+    // Sync state.tickers for both tiers
+    for(const g of [...topGappers, ...hotMovers]) {
       const ex = state.tickers.get(g.ticker) || {high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
       state.tickers.set(g.ticker, {...ex,...g, high:Math.max(g.high, ex.high)});
     }
-    console.log(`[${getET().timeStr}] ${topGappers.length} gappers`);
+    console.log(`[${getET().timeStr}] ${topGappers.length} gappers | ${hotMovers.length} hot movers`);
   } catch(e) { console.error('refreshGappers:', e.message); }
 }
 
 // ─── NHOD Alert ───────────────────────────────────────────────────────────────
 async function fireNHOD(ticker, price) {
   if(!isActive()) return;
-  const gapper = topGappers.find(g=>g.ticker===ticker);
+
+  // Check both tiers
+  const gapper     = topGappers.find(g=>g.ticker===ticker) || hotMovers.find(g=>g.ticker===ticker);
+  const isHotMover = !topGappers.find(g=>g.ticker===ticker) && !!hotMovers.find(g=>g.ticker===ticker);
   if(!gapper) return;
 
   const s = state.tickers.get(ticker);
@@ -287,22 +309,28 @@ async function fireNHOD(ticker, price) {
   const { etMin, timeStr } = getET();
 
   // ── Gates ─────────────────────────────────────────────────────────────────
-  if(price > 10)  return;
-  if(price < 0.10) return;
-
-  // Session rules
-  if(etMin >= 240 && etMin < 420) {
-    // 4AM–7AM: 10% gain, 100K vol
-    if(gapper.chgPct < 10)     return;
-    if(gapper.volume < 100000) return;
-  } else if(etMin >= 420 && etMin < 960) {
-    // 7AM–4PM: 15% gain, 1M vol
-    if(gapper.chgPct < 15)       return;
-    if(gapper.volume < 1000000)  return;
+  if(isHotMover) {
+    // Hot mover tier: ≥50% gain, ≥5M vol, price $0.10–$200, all sessions
+    if(price < 0.10 || price > 200)  return;
+    if(gapper.chgPct < 50)           return;
+    if(gapper.volume < 5_000_000)    return;
   } else {
-    // 4PM–8PM AH: 10% gain, 100K vol
-    if(gapper.chgPct < 10)     return;
-    if(gapper.volume < 100000) return;
+    // Standard tier
+    if(price > 10)   return;
+    if(price < 0.10) return;
+    if(etMin >= 240 && etMin < 420) {
+      // 4AM–7AM: 10% gain, 100K vol
+      if(gapper.chgPct < 10)     return;
+      if(gapper.volume < 100000) return;
+    } else if(etMin >= 420 && etMin < 960) {
+      // 7AM–4PM: 15% gain, 1M vol
+      if(gapper.chgPct < 15)      return;
+      if(gapper.volume < 1000000) return;
+    } else {
+      // 4PM–8PM AH: 10% gain, 100K vol
+      if(gapper.chgPct < 10)     return;
+      if(gapper.volume < 100000) return;
+    }
   }
 
   // Must move 7.5% above last alerted price
@@ -320,7 +348,7 @@ async function fireNHOD(ticker, price) {
   state.dailyCounts.set(ticker, (state.dailyCounts.get(ticker)||0)+1);
   state.tickers.set(ticker, {...state.tickers.get(ticker)});
 
-  console.log(`[${timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod}`);
+  console.log(`[${timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod} ${isHotMover?'[HOT]':''}`);
 
   // Fetch supporting data
   const [newsUrl, rs, det, fv, greenBars] = await Promise.all([
@@ -337,7 +365,7 @@ async function fireNHOD(ticker, price) {
   const floatStr = fv.float!=='--' ? ` | Float: ${fv.float}` : '';
   const ioStr    = fv.io!=='--'    ? ` | IO: ${fv.io}`    : '';
   const rsStr    = rs ? ` | ${rs}` : '';
-  // Reg SHO — check if on threshold securities list (approximation via short interest)
+  // Reg SHO — approximation via short interest
   const regSHO = fv.si!=='--' && parseFloat(fv.si)>50 ? ' | 🔴 Reg SHO' : '';
   const greenStr = greenBars>=2 ? ` · **${greenBars} green bars 1m**` : '';
 
@@ -360,8 +388,6 @@ async function fireNHOD(ticker, price) {
   const sessLabel = nhod===1 ? (sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH') : `${nhod} NHOD`;
   const tLink = newsUrl ? `[${ticker}](<${newsUrl}>)` : `**${ticker}**`;
 
-  // NuntioBot-style clean format:
-  // 13:22 ↗ HUBC <$.50c 121% · 15 3 green bars 1m ~ 🇮🇱 | RVol: 60x | Vol: 276M | Reg SHO
   const pctStr   = `+${gapper.chgPct.toFixed(1)}%`;
   const mcLine   = mc>0 ? ` | MC: ${fmtN(mc)}` : '';
   const extraLine= [
@@ -413,9 +439,6 @@ async function handleNewsItem(title, tickers, url, published_utc) {
     const ioStr = fv.io!=='--' ? ` | IO: ${fv.io}` : '';
     const siStr = fv.si!=='--' ? ` | SI: ${fv.si}` : '';
 
-    // NuntioBot format:
-    // 06:30 ↑ EVTV <$3 ~ 🇺🇸 | IO: 4.61% | MC: 23.9M | SI: 22.5%
-    // • 2 min ago [PR] Title — Link
     const ageMs  = Date.now()-new Date(published_utc||Date.now()).getTime();
     const ageStr = ageMs<60000?`${Math.round(ageMs/1000)}s ago`:ageMs<3600000?`${Math.round(ageMs/60000)} min ago`:`${Math.round(ageMs/3600000)}h ago`;
     const prTag  = isDrop ? 'PR ↓' : 'PR';
@@ -483,7 +506,7 @@ async function checkFilings() {
   if(!isActive()) return;
   if(Date.now()-lastFilingCheck < 2*60*1000) return;
   lastFilingCheck = Date.now();
-  const knownTickers = new Set(topGappers.map(g=>g.ticker));
+  const knownTickers = new Set([...topGappers, ...hotMovers].map(g=>g.ticker));
   if(!knownTickers.size) return;
   const { timeStr } = getET();
   for(const ticker of knownTickers) {
@@ -496,7 +519,7 @@ async function checkFilings() {
         state.sentFilings.add(id);
         const ft = (f.form_type||'SEC').toUpperCase();
         const isDil = /S-3|S-1|424B/.test(ft);
-        const g = topGappers.find(x=>x.ticker===ticker);
+        const g = [...topGappers, ...hotMovers].find(x=>x.ticker===ticker);
         const pStr = g ? ` | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\`` : '';
         const line = `\`${timeStr}\` **SEC** **${ticker}**${isDil?' ⚠️':''} — Form ${ft}${f.filing_url?` — [Link](<${f.filing_url}>)`:''}${pStr}`;
         await post({content:line});
@@ -541,20 +564,25 @@ function connectPriceWS() {
       for(const msg of JSON.parse(data.toString())) {
         if(msg.ev==='status' && msg.status==='auth_success') {
           subscribedTickers.clear();
-          const subs = topGappers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
-          if(subs) { ws.send(JSON.stringify({action:'subscribe',params:subs})); topGappers.forEach(g=>subscribedTickers.add(g.ticker)); }
-          console.log(`[Price WS] Subscribed to ${topGappers.length} tickers`);
+          const allTickers = [...topGappers, ...hotMovers];
+          const subs = allTickers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
+          if(subs) { ws.send(JSON.stringify({action:'subscribe',params:subs})); allTickers.forEach(g=>subscribedTickers.add(g.ticker)); }
+          console.log(`[Price WS] Subscribed to ${topGappers.length} gappers + ${hotMovers.length} hot movers`);
         }
         if(msg.ev==='T'||msg.ev==='A') {
           const ticker = msg.sym;
           const price  = msg.ev==='T' ? msg.p : (msg.c||msg.h||0);
           if(!price||!ticker) continue;
 
-          // Hard pre-filter
-          if(!topGappers.length) continue;
-          const g = topGappers.find(x=>x.ticker===ticker);
+          // Check both tiers
+          const g = topGappers.find(x=>x.ticker===ticker) || hotMovers.find(x=>x.ticker===ticker);
           if(!g) continue;
-          if(g.volume<100000||g.price>10||g.chgPct<5) continue;
+
+          // Pre-filter: standard tier
+          const isHot = !!hotMovers.find(x=>x.ticker===ticker);
+          if(!isHot && (g.volume<100000||g.price>10||g.chgPct<5)) continue;
+          // Pre-filter: hot mover tier
+          if(isHot && (g.volume<5_000_000||g.chgPct<50)) continue;
 
           const s = state.tickers.get(ticker);
           if(!s) continue;
@@ -564,10 +592,10 @@ function connectPriceWS() {
           s.priceHistory.push({price,time:Date.now()});
           if(s.priceHistory.length>60) s.priceHistory.shift();
 
-          // Debounce: once per 2s per ticker
+          // Debounce: 10s min between checks per ticker
           if(price > s.high+0.001) {
             const last = wsDebounce.get(ticker)||0;
-            if(Date.now()-last > 10000) { // 10s min between checks per ticker
+            if(Date.now()-last > 10000) {
               wsDebounce.set(ticker, Date.now());
               fireNHOD(ticker, price).catch(()=>{});
             }
@@ -636,10 +664,11 @@ async function handleCmd(cmd, option, interaction) {
   try {
     if(cmd==='quote'||cmd==='q') reply=await buildQuoteEmbed(option);
     else if(cmd==='gappers'){
-      if(!topGappers.length) reply={content:'No hot gappers right now.'};
+      const all = [...topGappers, ...hotMovers];
+      if(!all.length) reply={content:'No hot gappers right now.'};
       else {
-        const rows=topGappers.map(g=>`**${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}`).join('\n');
-        reply={embeds:[{title:`🔥 Hot Gappers (${topGappers.length})`,description:rows,color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
+        const rows=all.map(g=>`**${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${hotMovers.find(h=>h.ticker===g.ticker)?' 🔥':''}`).join('\n');
+        reply={embeds:[{title:`🔥 Hot Gappers (${topGappers.length}) + Hot Movers (${hotMovers.length})`,description:rows,color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
       }
     }
     else if(cmd==='news'){
@@ -710,7 +739,7 @@ function connectDiscord() {
 async function registerCommands() {
   const cmds=[
     {name:'quote',description:'Full quote card',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
-    {name:'gappers',description:'Current hot gappers'},
+    {name:'gappers',description:'Current hot gappers & hot movers'},
     {name:'news',description:'Latest news',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
     {name:'si',description:'Short interest & float',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
     {name:'float',description:'Float & short interest',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
@@ -726,7 +755,7 @@ async function registerCommands() {
 async function main() {
   if(!POLY_KEY)      { console.error('FATAL: POLY_KEY missing'); process.exit(1); }
   if(!DISCORD_TOKEN) { console.error('FATAL: DISCORD_TOKEN missing'); process.exit(1); }
-  console.log('🤖 AziziBot v7 starting...');
+  console.log('🤖 AziziBot v8 starting...');
 
   await refreshEtfList();
   await refreshGappers();
@@ -740,7 +769,7 @@ async function main() {
   setInterval(async()=>{
     await refreshEtfList();
     await refreshGappers();
-    const newTickers = topGappers.map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
+    const newTickers = [...topGappers, ...hotMovers].map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
     if(newTickers.length) subscribeNewTickers(newTickers);
     await pollNews();
   }, 20*1000);
@@ -753,7 +782,7 @@ async function main() {
     await checkFilings();
   }, 60*1000);
 
-  console.log('🤖 AziziBot v7 running.');
+  console.log('🤖 AziziBot v8 running.');
 }
 
 main().catch(err=>{ console.error('Fatal:', err); process.exit(1); });
