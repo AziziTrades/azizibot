@@ -255,6 +255,9 @@ async function refreshTopGappers(){
       const ex=state.tickers.get(g.ticker)||{high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
       state.tickers.set(g.ticker,{...ex,...g,high:Math.max(g.high,ex.high)});
     }
+    if(topGappers.length===0){
+      state.tickers.clear(); // clear stale tickers when no gappers found
+    }
     console.log(`[${getETInfo().timeStr}] ${topGappers.length} gappers`);
   }catch(e){console.error('refreshTopGappers:',e.message);}
 }
@@ -665,6 +668,7 @@ function connectPriceWS(){
           const s=state.tickers.get(ticker);
           if(!s)continue;
           // Hard pre-filter at WS level — reject junk before fireNHOD even runs
+          if(!topGappers.length)continue; // no gappers = no alerts
           const g=topGappers.find(g=>g.ticker===ticker);
           if(!g)continue;
           if(g.volume<100000)continue;  // must have 100K+ volume
