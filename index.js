@@ -247,7 +247,7 @@ async function refreshTopGappers(){
     for(const src of[pg,pc])for(const t of((src&&src.tickers)||[]))
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
-      t.chgPct>=5&&t.price>=0.1&&t.price<=5&&
+      t.chgPct>=5&&t.price>=0.1&&t.price<=10&&
       t.volume>=100000&&!t.isOTCEx&&!isBadTicker(t.ticker)
     ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
     // Sync state.tickers
@@ -278,16 +278,16 @@ async function fireNHOD(ticker,price){
   const{etMin}=getETInfo();
 
   // 1. Price must be under $5 — use live trade price, not cached gapper.price
-  if(price>5)return;
-  if(gapper.price>5)return; // also check cached price as double guard
+  if(price>10)return;
+  if(gapper.price>10)return;
 
   // 2. Session-based % gain + volume — these numbers cannot lie
   if(etMin>=240&&etMin<360){
-    // Early pre-market 4AM–6AM
+    // Early pre-market 4AM–7AM
     if(gapper.chgPct<10)return;
     if(gapper.volume<100000)return;
-  }else if(etMin>=360&&etMin<960){
-    // Main session 6AM–4PM
+  }else if(etMin>=420&&etMin<960){
+    // Main session 7AM–4PM: 20% gain, 1M vol
     if(gapper.chgPct<20)return;
     if(gapper.volume<1000000)return;
   }else{
@@ -498,7 +498,7 @@ async function pollNews(){
         const priceCheck=(tdVol&&tdVol.lastTrade&&tdVol.lastTrade.p)||(tdVol&&tdVol.day&&tdVol.day.c)||0;
         if(!tdVol||volCheck===0)continue;       // block if snapshot failed entirely
         if(volCheck<100000)continue;        // hard rule: min 100K volume, no exceptions
-        if(priceCheck>5||priceCheck<0.10)continue;  // hard rule: price $0.10–$5 only
+        if(priceCheck>10||priceCheck<0.10)continue; // hard rule: price $0.10–$10 only
         const dedupId=isDrop?`prdrop_${id}_${ticker}`:`prspike_${id}_${ticker}`;
         const dedupSet=isDrop?state.sentPRDrop:state.sentPRSpike;
         if(dedupSet.has(dedupId))continue;
@@ -618,8 +618,10 @@ function connectHaltWS(){
           const id=`luld_${ticker}_${msg.s||Date.now()}`;
           if(state.sentHalts.has(id))continue;
           state.sentHalts.add(id);
-          const etInfo=getETInfo();
+          // Only alert halts for top gappers
           const gapper=topGappers.find(g=>g.ticker===ticker);
+          if(!gapper)continue;
+          const etInfo=getETInfo();
           const pStr=gapper?` → $${gapper.price.toFixed(4)}`:'';
           const vStr=gapper?` ~ ${fmtN(gapper.volume)} vol`:'';
           getLatestNewsUrl(ticker).then(newsUrl=>{
@@ -666,8 +668,8 @@ function connectPriceWS(){
           const g=topGappers.find(g=>g.ticker===ticker);
           if(!g)continue;
           if(g.volume<100000)continue;  // must have 100K+ volume
-          if(g.price>5)continue;        // cached price must be under $5
-          if(price>5)continue;            // live trade price must be under $5
+          if(g.price>10)continue;       // must be under $10
+          if(price>10)continue;          // live trade price must be under $10
           if(g.chgPct<5)continue;       // must be gapping up
           // Update price history
           if(!s.priceHistory)s.priceHistory=[];
