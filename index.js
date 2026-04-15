@@ -347,7 +347,7 @@ async function fireNHOD(ticker, price) {
 
   // Inline PR
   const prData = newsCache.get(ticker);
-  const prStr  = prData && (Date.now()-prData.ts)<60*60*1000 ? ` | [PR+](<${prData.url}>)` : '';
+  const prStr  = prData && (Date.now()-prData.ts)<15*60*1000 ? ` | [PR+](<${prData.url}>)` : '';
 
   const { sess } = getET();
   const sessLabel = nhod===1 ? (sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH') : `${nhod} NHOD`;
