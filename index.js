@@ -476,6 +476,13 @@ async function pollNews(){
       const etInfo=getETInfo();
       for(const ticker of tickers.slice(0,3)){
         if(isBadTicker(ticker))continue;
+        // Volume gate — only alert on stocks with real activity
+        const snapVol=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+        const tdVol=snapVol&&snapVol.ticker;
+        const volCheck=(tdVol&&tdVol.day&&tdVol.day.v)||0;
+        const priceCheck=(tdVol&&tdVol.lastTrade&&tdVol.lastTrade.p)||(tdVol&&tdVol.day&&tdVol.day.c)||0;
+        if(volCheck<100000)continue;   // min 100K volume for any news alert
+        if(priceCheck>20)continue;     // max $20 price
         const dedupId=isDrop?`prdrop_${id}_${ticker}`:`prspike_${id}_${ticker}`;
         const dedupSet=isDrop?state.sentPRDrop:state.sentPRSpike;
         if(dedupSet.has(dedupId))continue;
