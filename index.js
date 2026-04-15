@@ -248,7 +248,7 @@ async function refreshTopGappers(){
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
       t.chgPct>=5&&t.price>=0.1&&t.price<=5&&
-      t.volume>=100000&&t.rvol>=2&&!t.isOTCEx&&!isBadTicker(t.ticker)
+      t.volume>=100000&&!t.isOTCEx&&!isBadTicker(t.ticker)
     ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
     // Sync state.tickers
     for(const g of topGappers){
@@ -277,8 +277,9 @@ async function fireNHOD(ticker,price){
   // ── Hard gates — concrete reliable numbers only, no RVol dependency ──────
   const{etMin}=getETInfo();
 
-  // 1. Price must be under $5
+  // 1. Price must be under $5 — use live trade price, not cached gapper.price
   if(price>5)return;
+  if(gapper.price>5)return; // also check cached price as double guard
 
   // 2. Session-based % gain + volume — these numbers cannot lie
   if(etMin>=240&&etMin<360){
@@ -661,7 +662,8 @@ function connectPriceWS(){
           const g=topGappers.find(g=>g.ticker===ticker);
           if(!g)continue;
           if(g.volume<100000)continue;  // must have 100K+ volume
-          if(g.price>5)continue;        // must be under $5
+          if(g.price>5)continue;        // cached price must be under $5
+          if(price>5)continue;            // live trade price must be under $5
           if(g.chgPct<5)continue;       // must be gapping up
           // Update price history
           if(!s.priceHistory)s.priceHistory=[];
