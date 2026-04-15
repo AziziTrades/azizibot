@@ -348,6 +348,7 @@ async function fireNHOD(ticker,price){
   const flag=countryFlag(ticker);
   const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
   await post(WH.MAIN_CHAT,{content:line});
+  await post(WH.TOP_GAPPERS,{content:line});
 }
 
 // ─── Halts ────────────────────────────────────────────────────────────────────
@@ -416,6 +417,7 @@ async function checkSECFilings(){
         const line=`\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${isDil?' ⚠️':''} — Form ${ft}${f.filing_url?` — [Link](<${f.filing_url}>)`:''}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
         await post(WH.MAIN_CHAT,{content:`${line} | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\``});
+        await post(WH.TOP_GAPPERS,{content:`${line} | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\``});
         await sleep(300);
       }
     }catch(e){}
@@ -531,6 +533,7 @@ async function pollNews(){
         const full=`${line1}\n${line2}`;
         await post(WH.PRESS_RELEASES,{content:full});await sleep(300);
         await post(WH.MAIN_CHAT,{content:full});await sleep(300);
+        await post(WH.TOP_GAPPERS,{content:full});await sleep(300);
         console.log(`[${etInfo.timeStr}] ${isDrop?'PR-DROP':'PR-SPIKE'}: ${ticker}`);
       }
     }
