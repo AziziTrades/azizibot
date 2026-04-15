@@ -614,11 +614,18 @@ function connectHaltWS(){
           console.log('[Halt WS] Subscribed to LULD.*');
         }
         if(msg.ev==='LULD'){
-          const ticker=msg.T||'';const indicator=msg.i||'';
+          const ticker=msg.T||'';
           if(!ticker)continue;
-          const isResume=indicator==='U'||indicator==='A';
-          const isHalt=indicator==='D';
-          if(!isResume&&!isHalt)continue;
+          // Polygon LULD indicators is an array of integers
+          // Common halt/resume indicator codes
+          const indicators=Array.isArray(msg.i)?msg.i:[];
+          const hLimit=msg.h||0; // high limit price
+          const lLimit=msg.l||0; // low limit price
+          // A halt is indicated when both limits are 0, or indicator includes halt codes
+          // A resume is when limits are set (non-zero)
+          const isHalt=indicators.length===0||(hLimit===0&&lLimit===0);
+          const isResume=hLimit>0&&lLimit>0;
+          if(!isHalt&&!isResume)continue;
           const id=`luld_${ticker}_${msg.s||Date.now()}`;
           if(state.sentHalts.has(id))continue;
           state.sentHalts.add(id);
