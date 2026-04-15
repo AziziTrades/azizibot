@@ -347,7 +347,7 @@ async function fireNHOD(ticker,price){
   const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
   const flag=countryFlag(ticker);
   const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
-  await post(WH.MAIN_CHAT,{content:line});
+  await post(WH.TOP_GAPPERS,{content:line});
   await post(WH.TOP_GAPPERS,{content:line});
 }
 
@@ -382,10 +382,10 @@ async function checkHalts(){
         const rid=`resume_${id}`;if(state.sentResumes.has(rid))continue;
         state.sentResumes.add(rid);
         const line=`\`${resumeTime||etInfo.timeStr}\` ▶️ **RESUMED** ${tLink} | ${reasonText}${priceStr}${volStr}`;
-        await post(WH.MAIN_CHAT,{content:line});await sleep(300);await post(WH.HALT_ALERTS,{content:line});
+        await post(WH.TOP_GAPPERS,{content:line});await sleep(300);await post(WH.HALT_ALERTS,{content:line});
       }else{
         const line=`\`${haltTime||etInfo.timeStr}\` ⏸️ **HALTED** ${tLink} | ${reasonText}${priceStr}${volStr}`;
-        await post(WH.MAIN_CHAT,{content:line});await sleep(300);await post(WH.HALT_ALERTS,{content:line});
+        await post(WH.TOP_GAPPERS,{content:line});await sleep(300);await post(WH.HALT_ALERTS,{content:line});
         console.log(`[${etInfo.timeStr}] HALT: ${ticker} ${reasonText}`);
       }
       await sleep(400);
@@ -416,7 +416,7 @@ async function checkSECFilings(){
         const isDil=/S-3|S-1|424B/.test(ft);
         const line=`\`${etInfo.timeStr}\` **SEC** **${g.ticker}**${isDil?' ⚠️':''} — Form ${ft}${f.filing_url?` — [Link](<${f.filing_url}>)`:''}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
-        await post(WH.MAIN_CHAT,{content:`${line} | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\``});
+        await post(WH.TOP_GAPPERS,{content:`${line} | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\``});
         await post(WH.TOP_GAPPERS,{content:`${line} | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\``});
         await sleep(300);
       }
@@ -452,7 +452,7 @@ async function checkSECFilings(){
         const pStr=price>0?` | $${price.toFixed(4)}`+(gapper?` \`+${gapper.chgPct.toFixed(1)}%\``:''):'';
         const line=`\`${etInfo.timeStr}\` **SEC/EDGAR** **${ticker}**${isDil?' ⚠️':''} — Form ${ft}${link?` — [Link](<${link}>)`:''}${pStr}`;
         await post(WH.SEC_FILINGS,{content:line});await sleep(300);
-        await post(WH.MAIN_CHAT,{content:line});await sleep(300);
+        await post(WH.TOP_GAPPERS,{content:line});await sleep(300);
         console.log(`[${etInfo.timeStr}] EDGAR: ${ticker} ${ft}`);
       }
       await sleep(500);
@@ -532,7 +532,7 @@ async function pollNews(){
         const line2=`• ${ageStr} [${prTag}] ${title.slice(0,200)}${linkStr}`;
         const full=`${line1}\n${line2}`;
         await post(WH.PRESS_RELEASES,{content:full});await sleep(300);
-        await post(WH.MAIN_CHAT,{content:full});await sleep(300);
+        await post(WH.TOP_GAPPERS,{content:full});await sleep(300);
         await post(WH.TOP_GAPPERS,{content:full});await sleep(300);
         console.log(`[${etInfo.timeStr}] ${isDrop?'PR-DROP':'PR-SPIKE'}: ${ticker}`);
       }
@@ -627,7 +627,7 @@ function connectHaltWS(){
             const line=isResume
               ?`\`${etInfo.timeStr}\` ▶️ **RESUMED** ${tLink}${pStr}${vStr}`
               :`\`${etInfo.timeStr}\` ⏸️ **HALTED** ${tLink} | Volatility Pause${pStr}${vStr}`;
-            post(WH.MAIN_CHAT,{content:line}).then(()=>sleep(300)).then(()=>post(WH.HALT_ALERTS,{content:line}));
+            post(WH.TOP_GAPPERS,{content:line}).then(()=>sleep(300)).then(()=>post(WH.HALT_ALERTS,{content:line}));
             console.log(`[${etInfo.timeStr}] ${isResume?'RESUME':'HALT'}: ${ticker}`);
           });
         }
