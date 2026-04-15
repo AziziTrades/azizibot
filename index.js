@@ -223,6 +223,7 @@ async function refreshTopGappers(){
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
       polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=100'),
     ]);
+    console.log(`[Poly] gainers:${pg?.tickers?.length||0} status:${pg?.status} top100:${pc?.tickers?.length||0} status:${pc?.status}`);
     const{etMin}=getETInfo();
     const build=t=>{
       const lp=(t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
