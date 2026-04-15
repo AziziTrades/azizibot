@@ -124,7 +124,7 @@ async function getRecentSplit(ticker){
 }
 
 async function getFinvizStats(ticker){
-  const r={si:'--',float:'--'};
+  const r={si:'--',float:'--',io:'--'};
   try{
     const html=await rawGet(`https://finviz.com/quote.ashx?t=${ticker}`,{
       'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -135,6 +135,8 @@ async function getFinvizStats(ticker){
       if(fm&&fm[1]&&fm[1]!=='-')r.float=fm[1].trim();
       const sm=html.match(/Short Float[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Short Float[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
       if(sm&&sm[1]&&sm[1]!=='-')r.si=sm[1].includes('%')?sm[1].trim():sm[1].trim()+'%';
+      const im=html.match(/Inst Own[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Inst Own[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
+      if(im&&im[1]&&im[1]!=='-')r.io=im[1].includes('%')?im[1].trim():im[1].trim()+'%';
     }
     if(r.float==='--'&&r.si==='--')console.log(`[Finviz] ${ticker}: len=${html.length} — no match`);
   }catch(e){console.error(`[Finviz] ${ticker}:`,e.message);}
@@ -463,6 +465,7 @@ async function pollNews(){
       const tickers=(n.tickers||[]).filter(Boolean).map(t=>t.toUpperCase());
       if(!tickers.length)continue;
       const url=n.article_url||'';
+      const published_utc=n.published_utc||'';
       const id=(url||title).slice(0,100);
       if(state.sentNews.has(id))continue;
       state.sentNews.add(id);
@@ -473,33 +476,41 @@ async function pollNews(){
       const etInfo=getETInfo();
       for(const ticker of tickers.slice(0,3)){
         if(isBadTicker(ticker))continue;
-        if(isDrop){
-          const dId=`prdrop_${id}_${ticker}`;if(state.sentPRDrop.has(dId))continue;
-          state.sentPRDrop.add(dId);
-          const[snap,det]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
-          const td=snap&&snap.ticker;
-          const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-          const mc=det.market_cap||0;
-          const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-          const pStr=price>0?` \`${priceFlag(price)}\``:'';
-          const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${url?` - [Link](<${url}>)`:''}  ~ ${countryFlag(ticker)}${mcStr}`;
-          await post(WH.PRESS_RELEASES,{content:`📉 **PR ↓ DROP** ${line}`});await sleep(300);
-          await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📉 **PR ↓ DROP** ${line}`});await sleep(300);
-          console.log(`[${etInfo.timeStr}] PR-DROP: ${ticker}`);
-        }else{
-          const sId=`prspike_${id}_${ticker}`;if(state.sentPRSpike.has(sId))continue;
-          state.sentPRSpike.add(sId);
-          const[snap,det]=await Promise.all([polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),getTickerDetails(ticker)]);
-          const td=snap&&snap.ticker;
-          const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-          const mc=det.market_cap||0;
-          const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
-          const pStr=price>0?` \`${priceFlag(price)}\``:'';
-          const line=`**${ticker}**${pStr} - ${title.slice(0,200)}${url?` - [Link](<${url}>)`:''}  ~ ${countryFlag(ticker)}${mcStr}`;
-          await post(WH.PRESS_RELEASES,{content:`📈 **PR - Spike** ${line}`});await sleep(300);
-          await post(WH.MAIN_CHAT,{content:`\`${etInfo.timeStr}\` 📈 **PR - Spike** ${line}`});await sleep(300);
-          console.log(`[${etInfo.timeStr}] PR-SPIKE: ${ticker}`);
-        }
+        const dedupId=isDrop?`prdrop_${id}_${ticker}`:`prspike_${id}_${ticker}`;
+        const dedupSet=isDrop?state.sentPRDrop:state.sentPRSpike;
+        if(dedupSet.has(dedupId))continue;
+        dedupSet.add(dedupId);
+
+        const[snap,det,fv]=await Promise.all([
+          polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`),
+          getTickerDetails(ticker),
+          getFinvizStats(ticker)
+        ]);
+        const td=snap&&snap.ticker;
+        const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+        const prev=(td&&td.prevDay&&td.prevDay.c)||0;
+        const chgPct=price&&prev?((price-prev)/prev)*100:0;
+        const mc=det.market_cap||0;
+        const io=det.weighted_shares_outstanding||0; // IO from Polygon details
+
+        // NuntioBot format:
+        // 06:30 ↑ EVTV <$3 ~ 🇺🇸 | IO: 4.61% | MC: 23.9M | SI: 22.5%
+        // • 2 minutes ago [PR] Title — Link
+        const pStr=price>0?` \`${priceFlag(price)}\``:'';
+        const arrow=chgPct>=0?'↑':'↓';
+        const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+        const ioStr=fv.io!=='--'?` | IO: ${fv.io}`:'  ';
+        const siStr=fv.si!=='--'?` | SI: ${fv.si}`:'';
+        const ageMs=Date.now()-new Date(published_utc||Date.now()).getTime();
+        const ageStr=ageMs<60000?`${Math.round(ageMs/1000)}s ago`:ageMs<3600000?`${Math.round(ageMs/60000)} min ago`:`${Math.round(ageMs/3600000)}h ago`;
+        const prTag=isDrop?'PR ↓':'PR';
+        const linkStr=url?` — [Link](<${url}>)`:'';
+        const line1=`\`${etInfo.timeStr}\` ${arrow} **${ticker}**${pStr} ~ ${countryFlag(ticker)}${mcStr}${ioStr}${siStr}`;
+        const line2=`• ${ageStr} [${prTag}] ${title.slice(0,200)}${linkStr}`;
+        const full=`${line1}\n${line2}`;
+        await post(WH.PRESS_RELEASES,{content:full});await sleep(300);
+        await post(WH.MAIN_CHAT,{content:full});await sleep(300);
+        console.log(`[${etInfo.timeStr}] ${isDrop?'PR-DROP':'PR-SPIKE'}: ${ticker}`);
       }
     }
     if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(x=>state.sentNews.add(x));}
