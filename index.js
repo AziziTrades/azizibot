@@ -193,6 +193,7 @@ function isBadTicker(t){
 const state={
   // Per-ticker tracking
   tickers:new Map(),       // {high, nhod, lastAlertPrice, lastAlertTime, priceHistory}
+  dailyAlertCount:new Map(), // ticker -> count of alerts fired today
   // Dedup sets
   sentHalts:new Set(),sentResumes:new Set(),sentFilings:new Set(),
   sentPRSpike:new Set(),sentPRDrop:new Set(),sentNews:new Set(),
@@ -290,14 +291,18 @@ async function fireNHOD(ticker,price){
   }
 
   // 4. Must move 8% above last alerted price — no micro-tick spam
-  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.08)return;
+  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.20)return; // must be 20% above last alert price
 
   // 5. 10-min cooldown per ticker
-  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<10*60*1000)return;
+  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<30*60*1000)return; // 30-min cooldown
+  // Hard cap: max 3 NHOD alerts per ticker per day
+  const dayCount=(state.dailyAlertCount.get(ticker)||0);
+  if(dayCount>=3)return;
   // ─────────────────────────────────────────────────────────────────────────
 
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now()});
+  state.dailyAlertCount.set(ticker,(state.dailyAlertCount.get(ticker)||0)+1);
   state.alertedToday.add(ticker);
 
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod} RVol:${fmtRVol(gapper.rvol)}`);
@@ -866,9 +871,9 @@ async function main(){
 
   // Slow loop: halts, filings, morning snapshot every 60s
   setInterval(async()=>{
-    // Reset alertedToday at midnight ET
+    // Reset daily counters at midnight ET
     const{h,m}=getETInfo();
-    if(h===0&&m<1)state.alertedToday.clear();
+    if(h===0&&m<1){state.alertedToday.clear();state.dailyAlertCount.clear();}
     await checkMorningSnapshot();
     await checkHalts();
     await checkSECFilings();
