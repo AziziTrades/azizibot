@@ -494,8 +494,9 @@ async function pollNews(){
         const volCheck=(tdVol&&tdVol.day&&tdVol.day.v)||0;
         const prevVolCheck=(tdVol&&tdVol.prevDay&&tdVol.prevDay.v)||0;
         const priceCheck=(tdVol&&tdVol.lastTrade&&tdVol.lastTrade.p)||(tdVol&&tdVol.day&&tdVol.day.c)||0;
+        if(!tdVol||volCheck===0)continue;       // block if snapshot failed entirely
         if(volCheck<100000)continue;        // hard rule: min 100K volume, no exceptions
-        if(priceCheck>20||priceCheck<0.10)continue; // price $0.10–$20
+        if(priceCheck>5||priceCheck<0.10)continue;  // hard rule: price $0.10–$5 only
         const dedupId=isDrop?`prdrop_${id}_${ticker}`:`prspike_${id}_${ticker}`;
         const dedupSet=isDrop?state.sentPRDrop:state.sentPRSpike;
         if(dedupSet.has(dedupId))continue;
