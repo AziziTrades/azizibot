@@ -248,7 +248,7 @@ async function refreshTopGappers(){
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
       t.chgPct>=5&&t.price>=0.1&&t.price<=5&&
-      t.volume>=100000&&!t.isOTCEx&&!isBadTicker(t.ticker)
+      t.volume>=100000&&t.rvol>=2&&!t.isOTCEx&&!isBadTicker(t.ticker)
     ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
     // Sync state.tickers
     for(const g of topGappers){
@@ -282,8 +282,16 @@ async function fireNHOD(ticker,price){
   // 1. Universe filter: price must be under $5 (NuntioBot never fires on $10+ stocks)
   if(price>5)return;
 
-  // 2. RVol must be genuinely unusual — NuntioBot minimum appears to be ~10x
-  if(gapper.rvol<10)return;
+  // 2. RVol must be genuinely unusual — recalculate live every time (not cached)
+  const liveRVol=(()=>{
+    const vol=gapper.volume||0;
+    const pv2=gapper.prevVol||0;
+    const mins=Math.max(etMin-240,1);
+    return pv2>0?(vol*390)/(mins*pv2):0;
+  })();
+  if(liveRVol<10)return;
+  // Update gapper rvol with fresh value for display
+  gapper.rvol=liveRVol;
 
   // 3. Session-based volume floor
   if(etMin>=240&&etMin<360){
