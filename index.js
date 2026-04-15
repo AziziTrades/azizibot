@@ -145,10 +145,16 @@ async function getTickerDetails(ticker) {
 
 async function getNewsUrl(ticker) {
   const c = newsCache.get(ticker);
-  if(c && Date.now()-c.ts < 30*60*1000) return c.url;
+  if(c && Date.now()-c.ts < 15*60*1000) return c.url;
   try {
     const r = await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
-    const url = r&&r.results&&r.results[0]&&r.results[0].article_url || null;
+    const item = r&&r.results&&r.results[0];
+    if(!item) return null;
+    // Only return URL if article was published today
+    const published = new Date(item.published_utc||0).getTime();
+    const todayStart = new Date().setHours(0,0,0,0);
+    if(published < todayStart) return null;
+    const url = item.article_url||null;
     if(url) newsCache.set(ticker, {url, ts:Date.now()});
     return url;
   } catch(e) { return null; }
