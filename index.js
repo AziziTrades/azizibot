@@ -13,12 +13,10 @@ const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57U
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
 // ─── Session rules ────────────────────────────────────────────────────────────
-// Standard tier  (price $0.10–$10):
-//   4:00–7:00 AM ET  → 10% gain, 100K vol
-//   7:00 AM–4:00 PM  → 15% gain, 1M vol
-//   4:00–8:00 PM ET  → 10% gain, 100K vol
-// Hot mover tier (price $0.10–$200):
-//   Any session      → 50% gain, 5M vol
+// 4:00–7:00 AM ET  → 10% gain, 100K vol
+// 7:00 AM–4:00 PM  → 15% gain, 1M vol
+// 4:00–8:00 PM ET  → 10% gain, 100K vol
+// Morning watchlist (locked in 4AM–10AM): pre-qualified, only needs new high of day
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
@@ -40,7 +38,7 @@ function isActive()  { return getET().etMin >= 240 && getET().etMin < 1200; }
 function sleep(ms)   { return new Promise(r => setTimeout(r, ms)); }
 function fmtN(n)     { if(!n||isNaN(n))return'--'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'K'; return String(n); }
 function fmtRVol(r)  { if(!r||isNaN(r)||r===0)return'--'; if(r>=1000)return Math.round(r).toLocaleString()+'x'; if(r>=10)return r.toFixed(0)+'x'; return r.toFixed(1)+'x'; }
-function priceFlag(p){ if(p<0.50)return'<$.50c'; if(p<1)return'<$1'; if(p<2)return'<$2'; if(p<5)return'<$5'; if(p<10)return'<$10'; if(p<15)return'<$15'; if(p<25)return'<$25'; if(p<50)return'<$50'; if(p<100)return'<$100'; return'<$200'; }
+function priceFlag(p){ if(p<0.50)return'<$.50c'; if(p<1)return'<$1'; if(p<2)return'<$2'; if(p<5)return'<$5'; return'<$10'; }
 function flag(ticker){
   const c = countryMap.get(ticker);
   if(c==='IL')return'🇮🇱'; if(c==='CN')return'🇨🇳'; if(c==='GB')return'🇬🇧'; if(c==='CA')return'🇨🇦';
@@ -49,11 +47,11 @@ function flag(ticker){
 
 function isBadTicker(t) {
   if(!t||t.length<2)return true;
-  if(t.includes('.'))return true;                            // BRK.A
-  if(/^[A-Z]{5}$/.test(t)&&/[FQEX]$/.test(t))return true;  // OTC suffixes
-  if(/WS?$/.test(t)&&t.length>=5)return true;               // warrants RGTIW
-  if(/^[A-Z]{4,5}R$/.test(t))return true;                   // rights
-  if(/^[A-Z]{4,5}U$/.test(t))return true;                   // units
+  if(t.includes('.'))return true;
+  if(/^[A-Z]{5}$/.test(t)&&/[FQEX]$/.test(t))return true;
+  if(/WS?$/.test(t)&&t.length>=5)return true;
+  if(/^[A-Z]{4,5}R$/.test(t))return true;
+  if(/^[A-Z]{4,5}U$/.test(t))return true;
   return false;
 }
 
@@ -131,7 +129,7 @@ function isEtf(t) { return etfSet.has(t); }
 // ─── Caches ───────────────────────────────────────────────────────────────────
 const countryMap    = new Map();
 const tickerCache   = new Map();
-const newsCache     = new Map(); // ticker → {url, ts}
+const newsCache     = new Map();
 
 async function getTickerDetails(ticker) {
   const c = tickerCache.get(ticker);
@@ -152,7 +150,6 @@ async function getNewsUrl(ticker) {
     const r = await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
     const item = r&&r.results&&r.results[0];
     if(!item) return null;
-    // Only return URL if article was published today
     const published = new Date(item.published_utc||0).getTime();
     const todayStart = new Date().setHours(0,0,0,0);
     if(published < todayStart) return null;
@@ -193,7 +190,6 @@ async function getFinvizStats(ticker) {
       if(im&&im[1]&&im[1]!=='-') r.io = im[1].includes('%') ? im[1].trim() : im[1].trim()+'%';
     }
   } catch(e) {}
-  // Fallback float from Polygon
   if(r.float==='--') {
     try {
       const det = await getTickerDetails(ticker);
@@ -217,18 +213,25 @@ async function getGreenBars(ticker) {
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let topGappers = [];
-let hotMovers  = []; // ≥50% gain, ≥5M vol, price $0.10–$200
+
+// Morning watchlist — tickers that qualified as a gapper between 4AM–10AM ET.
+// Locked in for the full trading day. Snapshot is their qualifying stats
+// (used in alert display). Pre-qualified means no session % / vol re-check;
+// only price range + new-high + cooldown + daily-max gates apply.
+// Shape: ticker → { ticker, chgPct, volume, rvol, price, high }
+const morningWatchlist = new Map();
+
 const state = {
-  tickers:      new Map(),    // ticker → {high, nhod, lastAlertPrice, lastAlertTime, priceHistory}
-  dailyCounts:  new Map(),    // ticker → alert count today
+  tickers:      new Map(),
+  dailyCounts:  new Map(),
   sentNews:     new Set(),
   sentFilings:  new Set(),
   sentPR:       new Set(),
   morningPosted:new Set(),
 };
-const wsDebounce = new Map(); // ticker → last fireNHOD attempt ms
+const wsDebounce = new Map();
 
-// ─── Top Gappers + Hot Movers refresh ────────────────────────────────────────
+// ─── Top Gappers refresh ──────────────────────────────────────────────────────
 async function refreshGappers() {
   try {
     const { etMin } = getET();
@@ -258,7 +261,6 @@ async function refreshGappers() {
       for(const t of ((src&&src.tickers)||[]))
         if(t.ticker && !merge.has(t.ticker)) merge.set(t.ticker, build(t));
 
-    // Standard tier: $0.10–$10, ≥5% gain, ≥100K vol
     const newGappers = [...merge.values()].filter(t =>
       t.chgPct >= 5 &&
       t.price  >= 0.10 &&
@@ -271,26 +273,39 @@ async function refreshGappers() {
 
     topGappers = newGappers;
 
-    // Hot mover tier: $0.10–$200, ≥50% gain, ≥5M vol, not already in topGappers
-    const newHotMovers = [...merge.values()].filter(t =>
-      t.chgPct  >= 50 &&
-      t.price   >= 0.10 &&
-      t.price   <= 200 &&
-      t.volume  >= 5_000_000 &&
-      !t.isOTC &&
-      !isEtf(t.ticker) &&
-      !isBadTicker(t.ticker) &&
-      !topGappers.find(g => g.ticker === t.ticker)
-    ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,20);
+    // ── Lock in morning qualifiers (4AM–10AM window) ──────────────────────
+    if(etMin >= 240 && etMin <= 600) {
+      for(const g of topGappers) {
+        if(!morningWatchlist.has(g.ticker)) {
+          morningWatchlist.set(g.ticker, {
+            ticker: g.ticker,
+            chgPct: g.chgPct,
+            volume: g.volume,
+            rvol:   g.rvol,
+            price:  g.price,
+            high:   g.high,
+          });
+          console.log(`[Morning] Locked in ${g.ticker} +${g.chgPct.toFixed(1)}% vol:${fmtN(g.volume)}`);
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
-    hotMovers = newHotMovers;
-
-    // Sync state.tickers for both tiers
-    for(const g of [...topGappers, ...hotMovers]) {
+    // Sync state.tickers for live gappers
+    for(const g of topGappers) {
       const ex = state.tickers.get(g.ticker) || {high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
       state.tickers.set(g.ticker, {...ex,...g, high:Math.max(g.high, ex.high)});
     }
-    console.log(`[${getET().timeStr}] ${topGappers.length} gappers | ${hotMovers.length} hot movers`);
+
+    // Ensure morning watchlist tickers always have a state entry
+    // (they keep their tracked high even after dropping out of topGappers)
+    for(const [ticker, g] of morningWatchlist) {
+      if(!state.tickers.has(ticker)) {
+        state.tickers.set(ticker, {high:g.high, nhod:0, lastAlertPrice:0, lastAlertTime:0, priceHistory:[], ...g});
+      }
+    }
+
+    console.log(`[${getET().timeStr}] ${topGappers.length} gappers | ${morningWatchlist.size} morning watchlist`);
   } catch(e) { console.error('refreshGappers:', e.message); }
 }
 
@@ -298,9 +313,10 @@ async function refreshGappers() {
 async function fireNHOD(ticker, price) {
   if(!isActive()) return;
 
-  // Check both tiers
-  const gapper     = topGappers.find(g=>g.ticker===ticker) || hotMovers.find(g=>g.ticker===ticker);
-  const isHotMover = !topGappers.find(g=>g.ticker===ticker) && !!hotMovers.find(g=>g.ticker===ticker);
+  const liveGapper   = topGappers.find(g=>g.ticker===ticker);
+  const morningGapper = morningWatchlist.get(ticker);
+  const gapper        = liveGapper || morningGapper;
+  const isMorningOnly = !liveGapper && !!morningGapper;
   if(!gapper) return;
 
   const s = state.tickers.get(ticker);
@@ -309,25 +325,21 @@ async function fireNHOD(ticker, price) {
   const { etMin, timeStr } = getET();
 
   // ── Gates ─────────────────────────────────────────────────────────────────
-  if(isHotMover) {
-    // Hot mover tier: ≥50% gain, ≥5M vol, price $0.10–$200, all sessions
-    if(price < 0.10 || price > 200)  return;
-    if(gapper.chgPct < 50)           return;
-    if(gapper.volume < 5_000_000)    return;
+  if(price > 10)   return;
+  if(price < 0.10) return;
+
+  if(isMorningOnly) {
+    // Pre-qualified during 4AM–10AM — skip session % / vol re-checks.
+    // Price range above is the only hard filter.
   } else {
-    // Standard tier
-    if(price > 10)   return;
-    if(price < 0.10) return;
+    // Live gapper — normal session rules
     if(etMin >= 240 && etMin < 420) {
-      // 4AM–7AM: 10% gain, 100K vol
       if(gapper.chgPct < 10)     return;
       if(gapper.volume < 100000) return;
     } else if(etMin >= 420 && etMin < 960) {
-      // 7AM–4PM: 15% gain, 1M vol
       if(gapper.chgPct < 15)      return;
       if(gapper.volume < 1000000) return;
     } else {
-      // 4PM–8PM AH: 10% gain, 100K vol
       if(gapper.chgPct < 10)     return;
       if(gapper.volume < 100000) return;
     }
@@ -346,11 +358,9 @@ async function fireNHOD(ticker, price) {
   const nhod = (s.nhod||0) + 1;
   state.tickers.set(ticker, {...s, high:price, nhod, lastAlertPrice:price, lastAlertTime:Date.now(), priceHistory:s.priceHistory||[]});
   state.dailyCounts.set(ticker, (state.dailyCounts.get(ticker)||0)+1);
-  state.tickers.set(ticker, {...state.tickers.get(ticker)});
 
-  console.log(`[${timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod} ${isHotMover?'[HOT]':''}`);
+  console.log(`[${timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod}${isMorningOnly?' [morning-watch]':''}`);
 
-  // Fetch supporting data
   const [newsUrl, rs, det, fv, greenBars] = await Promise.all([
     getNewsUrl(ticker),
     getRecentSplit(ticker),
@@ -360,16 +370,10 @@ async function fireNHOD(ticker, price) {
   ]);
 
   const mc       = det.market_cap || 0;
-  const mcStr    = mc>0 ? ` | MC: ${fmtN(mc)}` : '';
-  const siStr    = fv.si!=='--'    ? ` | SI: ${fv.si}`    : '';
-  const floatStr = fv.float!=='--' ? ` | Float: ${fv.float}` : '';
-  const ioStr    = fv.io!=='--'    ? ` | IO: ${fv.io}`    : '';
   const rsStr    = rs ? ` | ${rs}` : '';
-  // Reg SHO — approximation via short interest
-  const regSHO = fv.si!=='--' && parseFloat(fv.si)>50 ? ' | 🔴 Reg SHO' : '';
+  const regSHO   = fv.si!=='--' && parseFloat(fv.si)>50 ? ' | 🔴 Reg SHO' : '';
   const greenStr = greenBars>=2 ? ` · **${greenBars} green bars 1m**` : '';
 
-  // After-lull detection
   const hist = (state.tickers.get(ticker)||{}).priceHistory||[];
   let afterLull = '';
   if(hist.length>=10){
@@ -380,22 +384,23 @@ async function fireNHOD(ticker, price) {
     }
   }
 
-  // Inline PR
   const prData = newsCache.get(ticker);
   const prStr  = prData && (Date.now()-prData.ts)<15*60*1000 ? ` | [PR+](<${prData.url}>)` : '';
 
   const { sess } = getET();
   const sessLabel = nhod===1 ? (sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH') : `${nhod} NHOD`;
-  const tLink = newsUrl ? `[${ticker}](<${newsUrl}>)` : `**${ticker}**`;
+  const tLink     = newsUrl ? `[${ticker}](<${newsUrl}>)` : `**${ticker}**`;
 
-  const pctStr   = `+${gapper.chgPct.toFixed(1)}%`;
-  const mcLine   = mc>0 ? ` | MC: ${fmtN(mc)}` : '';
-  const extraLine= [
+  // For morning-only tickers, gapper stats show their qualifying snapshot
+  // (e.g. "+180% 2.4M vol at 6AM") — good context in the alert.
+  const pctStr    = `+${gapper.chgPct.toFixed(1)}%`;
+  const mcLine    = mc>0 ? ` | MC: ${fmtN(mc)}` : '';
+  const extraLine = [
     fv.float!=='--' ? `Float: ${fv.float}` : '',
     fv.si!=='--'    ? `SI: ${fv.si}`        : '',
     fv.io!=='--'    ? `IO: ${fv.io}`        : '',
   ].filter(Boolean).join(' | ');
-  const extraStr = extraLine ? `\n> ${extraLine}` : '';
+  const extraStr  = extraLine ? `\n> ${extraLine}` : '';
   const line = `\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
   await post({content: line});
 }
@@ -410,7 +415,6 @@ async function handleNewsItem(title, tickers, url, published_utc) {
   if(state.sentNews.has(id)) return;
   state.sentNews.add(id);
 
-  // Cache news URL for each ticker
   for(const t of tickers) if(url) newsCache.set(t, {url, ts:Date.now()});
 
   const isDrop  = DROP_RE.test(title);
@@ -426,7 +430,6 @@ async function handleNewsItem(title, tickers, url, published_utc) {
     if(state.sentPR.has(prId)) continue;
     state.sentPR.add(prId);
 
-    // Volume + price check
     const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
     const td   = snap&&snap.ticker;
     const vol  = (td&&td.day&&td.day.v)||0;
@@ -449,7 +452,6 @@ async function handleNewsItem(title, tickers, url, published_utc) {
     console.log(`[${timeStr}] ${isDrop?'PR-DROP':'PR-SPIKE'}: ${ticker}`);
   }
 
-  // Cleanup
   if(state.sentNews.size>500){const a=[...state.sentNews];state.sentNews.clear();a.slice(-200).forEach(x=>state.sentNews.add(x));}
   if(state.sentPR.size>500){const a=[...state.sentPR];state.sentPR.clear();a.slice(-200).forEach(x=>state.sentPR.add(x));}
 }
@@ -482,11 +484,11 @@ function connectBZ() {
   });
 }
 
-// Polygon news fallback poll (when BZ WS is down)
+// Polygon news fallback poll
 let lastNewsPoll = 0;
 async function pollNews() {
   if(!isActive()) return;
-  if(Date.now()-lastNewsPoll < 5000) return; // poll every 5s
+  if(Date.now()-lastNewsPoll < 5000) return;
   lastNewsPoll = Date.now();
   try {
     const r = await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
@@ -506,7 +508,8 @@ async function checkFilings() {
   if(!isActive()) return;
   if(Date.now()-lastFilingCheck < 2*60*1000) return;
   lastFilingCheck = Date.now();
-  const knownTickers = new Set([...topGappers, ...hotMovers].map(g=>g.ticker));
+  // Watch filings for live gappers + morning watchlist
+  const knownTickers = new Set([...topGappers.map(g=>g.ticker), ...morningWatchlist.keys()]);
   if(!knownTickers.size) return;
   const { timeStr } = getET();
   for(const ticker of knownTickers) {
@@ -519,7 +522,7 @@ async function checkFilings() {
         state.sentFilings.add(id);
         const ft = (f.form_type||'SEC').toUpperCase();
         const isDil = /S-3|S-1|424B/.test(ft);
-        const g = [...topGappers, ...hotMovers].find(x=>x.ticker===ticker);
+        const g = topGappers.find(x=>x.ticker===ticker) || morningWatchlist.get(ticker);
         const pStr = g ? ` | $${g.price.toFixed(4)} \`+${g.chgPct.toFixed(1)}%\`` : '';
         const line = `\`${timeStr}\` **SEC** **${ticker}**${isDil?' ⚠️':''} — Form ${ft}${f.filing_url?` — [Link](<${f.filing_url}>)`:''}${pStr}`;
         await post({content:line});
@@ -532,7 +535,7 @@ async function checkFilings() {
 
 // ─── Morning Snapshot ─────────────────────────────────────────────────────────
 async function checkMorningSnapshot() {
-  const { hh, m, etMin } = getET();
+  const { hh, m } = getET();
   if((hh!==6&&hh!==7)||m!==0) return;
   const key = `${new Date().toISOString().slice(0,10)}_${hh}`;
   if(state.morningPosted.has(key)||!topGappers.length) return;
@@ -564,35 +567,32 @@ function connectPriceWS() {
       for(const msg of JSON.parse(data.toString())) {
         if(msg.ev==='status' && msg.status==='auth_success') {
           subscribedTickers.clear();
-          const allTickers = [...topGappers, ...hotMovers];
-          const subs = allTickers.map(g=>`T.${g.ticker},A.${g.ticker}`).join(',');
-          if(subs) { ws.send(JSON.stringify({action:'subscribe',params:subs})); allTickers.forEach(g=>subscribedTickers.add(g.ticker)); }
-          console.log(`[Price WS] Subscribed to ${topGappers.length} gappers + ${hotMovers.length} hot movers`);
+          // On reconnect, resubscribe to live gappers + full morning watchlist
+          const allKeys = new Set([...topGappers.map(g=>g.ticker), ...morningWatchlist.keys()]);
+          const subs = [...allKeys].map(t=>`T.${t},A.${t}`).join(',');
+          if(subs) { ws.send(JSON.stringify({action:'subscribe',params:subs})); allKeys.forEach(t=>subscribedTickers.add(t)); }
+          console.log(`[Price WS] Subscribed to ${topGappers.length} gappers + ${morningWatchlist.size} morning watchlist`);
         }
         if(msg.ev==='T'||msg.ev==='A') {
           const ticker = msg.sym;
           const price  = msg.ev==='T' ? msg.p : (msg.c||msg.h||0);
           if(!price||!ticker) continue;
 
-          // Check both tiers
-          const g = topGappers.find(x=>x.ticker===ticker) || hotMovers.find(x=>x.ticker===ticker);
-          if(!g) continue;
+          const liveG    = topGappers.find(x=>x.ticker===ticker);
+          const morningG = morningWatchlist.get(ticker);
+          if(!liveG && !morningG) continue;
 
-          // Pre-filter: standard tier
-          const isHot = !!hotMovers.find(x=>x.ticker===ticker);
-          if(!isHot && (g.volume<100000||g.price>10||g.chgPct<5)) continue;
-          // Pre-filter: hot mover tier
-          if(isHot && (g.volume<5_000_000||g.chgPct<50)) continue;
+          // Pre-filter for live gappers only; morning-watchlist tickers pass
+          // freely — full gate logic lives in fireNHOD
+          if(liveG && (liveG.volume<100000||liveG.price>10||liveG.chgPct<5)) continue;
 
           const s = state.tickers.get(ticker);
           if(!s) continue;
 
-          // Update price history
           if(!s.priceHistory) s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
           if(s.priceHistory.length>60) s.priceHistory.shift();
 
-          // Debounce: 10s min between checks per ticker
           if(price > s.high+0.001) {
             const last = wsDebounce.get(ticker)||0;
             if(Date.now()-last > 10000) {
@@ -664,11 +664,10 @@ async function handleCmd(cmd, option, interaction) {
   try {
     if(cmd==='quote'||cmd==='q') reply=await buildQuoteEmbed(option);
     else if(cmd==='gappers'){
-      const all = [...topGappers, ...hotMovers];
-      if(!all.length) reply={content:'No hot gappers right now.'};
+      if(!topGappers.length) reply={content:'No hot gappers right now.'};
       else {
-        const rows=all.map(g=>`**${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}${hotMovers.find(h=>h.ticker===g.ticker)?' 🔥':''}`).join('\n');
-        reply={embeds:[{title:`🔥 Hot Gappers (${topGappers.length}) + Hot Movers (${hotMovers.length})`,description:rows,color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
+        const rows=topGappers.map(g=>`**${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | RVol: ${fmtRVol(g.rvol)} | Vol: ${fmtN(g.volume)}`).join('\n');
+        reply={embeds:[{title:`🔥 Hot Gappers (${topGappers.length})`,description:rows,color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
       }
     }
     else if(cmd==='news'){
@@ -739,7 +738,7 @@ function connectDiscord() {
 async function registerCommands() {
   const cmds=[
     {name:'quote',description:'Full quote card',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
-    {name:'gappers',description:'Current hot gappers & hot movers'},
+    {name:'gappers',description:'Current hot gappers'},
     {name:'news',description:'Latest news',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
     {name:'si',description:'Short interest & float',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
     {name:'float',description:'Float & short interest',options:[{type:3,name:'ticker',description:'Ticker',required:true}]},
@@ -769,7 +768,11 @@ async function main() {
   setInterval(async()=>{
     await refreshEtfList();
     await refreshGappers();
-    const newTickers = [...topGappers, ...hotMovers].map(g=>g.ticker).filter(t=>!subscribedTickers.has(t));
+    // Subscribe to any tickers not yet in the WS feed
+    const newTickers = [...new Set([
+      ...topGappers.map(g=>g.ticker),
+      ...morningWatchlist.keys(),
+    ])].filter(t=>!subscribedTickers.has(t));
     if(newTickers.length) subscribeNewTickers(newTickers);
     await pollNews();
   }, 20*1000);
@@ -777,7 +780,13 @@ async function main() {
   // Slow loop: every 60s
   setInterval(async()=>{
     const {hh,m}=getET();
-    if(hh===0&&m<1){ state.dailyCounts.clear(); state.tickers.clear(); state.sentFilings.clear(); console.log('[Daily] Reset'); }
+    if(hh===0&&m<1){
+      state.dailyCounts.clear();
+      state.tickers.clear();
+      state.sentFilings.clear();
+      morningWatchlist.clear(); // new day — fresh watchlist
+      console.log('[Daily] Reset');
+    }
     await checkMorningSnapshot();
     await checkFilings();
   }, 60*1000);
