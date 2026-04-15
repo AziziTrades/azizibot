@@ -296,8 +296,8 @@ async function fireNHOD(ticker, price) {
     if(gapper.chgPct < 10)     return;
     if(gapper.volume < 100000) return;
   } else if(etMin >= 420 && etMin < 960) {
-    // 7AM–4PM: 20% gain, 1M vol
-    if(gapper.chgPct < 20)       return;
+    // 7AM–4PM: 15% gain, 1M vol
+    if(gapper.chgPct < 15)       return;
     if(gapper.volume < 1000000)  return;
   } else {
     // 4PM–8PM AH: 10% gain, 100K vol
