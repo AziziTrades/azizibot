@@ -204,7 +204,7 @@ async function getFinvizStats(ticker) {
 async function getGreenBars(ticker) {
   try {
     const today = new Date().toISOString().slice(0,10);
-    const r = await polyGet(`/v2/aggs/ticker/${ticker}/range/15/minute/${today}/${today}?adjusted=true&sort=desc&limit=10`);
+    const r = await polyGet(`/v2/aggs/ticker/${ticker}/range/1/minute/${today}/${today}?adjusted=true&sort=desc&limit=10`);
     const bars = (r&&r.results)||[];
     let count = 0;
     for(const bar of bars) { if(bar.c>bar.o) count++; else break; }
@@ -337,7 +337,9 @@ async function fireNHOD(ticker, price) {
   const floatStr = fv.float!=='--' ? ` | Float: ${fv.float}` : '';
   const ioStr    = fv.io!=='--'    ? ` | IO: ${fv.io}`    : '';
   const rsStr    = rs ? ` | ${rs}` : '';
-  const greenStr = greenBars>=2 ? ` · \`${greenBars} green bars 15m\`` : '';
+  // Reg SHO — check if on threshold securities list (approximation via short interest)
+  const regSHO = fv.si!=='--' && parseFloat(fv.si)>50 ? ' | 🔴 Reg SHO' : '';
+  const greenStr = greenBars>=2 ? ` · **${greenBars} green bars 1m**` : '';
 
   // After-lull detection
   const hist = (state.tickers.get(ticker)||{}).priceHistory||[];
@@ -358,7 +360,17 @@ async function fireNHOD(ticker, price) {
   const sessLabel = nhod===1 ? (sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH') : `${nhod} NHOD`;
   const tLink = newsUrl ? `[${ticker}](<${newsUrl}>)` : `**${ticker}**`;
 
-  const line = `\`${timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcStr}${ioStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
+  // NuntioBot-style clean format:
+  // 13:22 ↗ HUBC <$.50c 121% · 15 3 green bars 1m ~ 🇮🇱 | RVol: 60x | Vol: 276M | Reg SHO
+  const pctStr   = `+${gapper.chgPct.toFixed(1)}%`;
+  const mcLine   = mc>0 ? ` | MC: ${fmtN(mc)}` : '';
+  const extraLine= [
+    fv.float!=='--' ? `Float: ${fv.float}` : '',
+    fv.si!=='--'    ? `SI: ${fv.si}`        : '',
+    fv.io!=='--'    ? `IO: ${fv.io}`        : '',
+  ].filter(Boolean).join(' | ');
+  const extraStr = extraLine ? `\n> ${extraLine}` : '';
+  const line = `\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
   await post({content: line});
 }
 
