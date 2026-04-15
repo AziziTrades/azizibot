@@ -445,9 +445,8 @@ function connectBZ() {
 // Polygon news fallback poll (when BZ WS is down)
 let lastNewsPoll = 0;
 async function pollNews() {
-  if(BZ_KEY) return; // skip if BZ WS active
   if(!isActive()) return;
-  if(Date.now()-lastNewsPoll < 5000) return;
+  if(Date.now()-lastNewsPoll < 5000) return; // poll every 5s
   lastNewsPoll = Date.now();
   try {
     const r = await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
@@ -716,7 +715,8 @@ async function main() {
   await refreshGappers();
   connectPriceWS();
   connectDiscord();
-  if(BZ_KEY) connectBZ(); else console.warn('[BZ] No BZ_KEY — using Polygon news fallback');
+  // Benzinga WS disabled — using Polygon news poll
+  // if(BZ_KEY) connectBZ();
   await registerCommands();
 
   // Fast loop: every 20s
