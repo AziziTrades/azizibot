@@ -274,46 +274,34 @@ async function fireNHOD(ticker,price){
   // Debug log every NHOD candidate so we can see why things get blocked
   console.log(`[NHOD?] ${ticker} $${price.toFixed(4)} chg:${gapper.chgPct.toFixed(1)}% vol:${fmtN(gapper.volume)} rvol:${fmtRVol(gapper.rvol)} lastAlert:${s.lastAlertPrice?'$'+s.lastAlertPrice.toFixed(4):'none'} cooldown:${s.lastAlertTime?Math.round((Date.now()-s.lastAlertTime)/60000)+'m ago':'none'}`);
 
-  // ── NuntioBot-style quality gates ────────────────────────────────────────
-  // Based on observed NuntioBot behavior: only fires on low-price,
-  // low-float, high-RVol stocks. Universe is <$5, tiny float, huge RVol.
+  // ── Hard gates — concrete reliable numbers only, no RVol dependency ──────
   const{etMin}=getETInfo();
 
-  // 1. Universe filter: price must be under $5 (NuntioBot never fires on $10+ stocks)
+  // 1. Price must be under $5
   if(price>5)return;
 
-  // 2. RVol must be genuinely unusual — recalculate live every time (not cached)
-  const liveRVol=(()=>{
-    const vol=gapper.volume||0;
-    const pv2=gapper.prevVol||0;
-    const mins=Math.max(etMin-240,1);
-    return pv2>0?(vol*390)/(mins*pv2):0;
-  })();
-  if(liveRVol<10)return;
-  // Update gapper rvol with fresh value for display
-  gapper.rvol=liveRVol;
-
-  // 3. Session-based volume floor
+  // 2. Session-based % gain + volume — these numbers cannot lie
   if(etMin>=240&&etMin<360){
-    // Early pre-market 4AM–6AM: 10% gain, 100K vol
+    // Early pre-market 4AM–6AM
     if(gapper.chgPct<10)return;
     if(gapper.volume<100000)return;
   }else if(etMin>=360&&etMin<960){
-    // Main session 6AM–4PM: 20% gain, 1M vol
+    // Main session 6AM–4PM
     if(gapper.chgPct<20)return;
     if(gapper.volume<1000000)return;
   }else{
-    // After-hours 4PM–8PM: 10% gain, 100K vol
+    // After-hours 4PM–8PM
     if(gapper.chgPct<10)return;
     if(gapper.volume<100000)return;
   }
 
-  // 4. Must move 8% above last alerted price — no micro-tick spam
-  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.20)return; // must be 20% above last alert price
+  // 3. Must be 20% above last alerted price — no tick spam
+  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.20)return;
 
-  // 5. 10-min cooldown per ticker
-  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<30*60*1000)return; // 30-min cooldown
-  // Hard cap: max 3 NHOD alerts per ticker per day
+  // 4. 30-min cooldown per ticker
+  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<30*60*1000)return;
+
+  // 5. Max 3 alerts per ticker per day
   const dayCount=(state.dailyAlertCount.get(ticker)||0);
   if(dayCount>=3)return;
   // ─────────────────────────────────────────────────────────────────────────
