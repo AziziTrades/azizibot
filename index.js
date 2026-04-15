@@ -5,6 +5,7 @@ const https = require('https');
 const WebSocket = require('ws');
 
 const POLY_KEY      = process.env.POLY_KEY||'';
+const BZ_KEY        = process.env.BZ_KEY||'';
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN||'';
 const APP_ID        = '1493671812247322624';
 const BOT_NAME      = 'AziziBot';
@@ -233,7 +234,7 @@ async function refreshTopGappers(){
     for(const src of[pg,pc])for(const t of((src&&src.tickers)||[]))
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
-      t.chgPct>=5&&t.price>=0.1&&t.price<=20&&
+      t.chgPct>=5&&t.price>=0.1&&t.price<=5&&
       t.volume>=50000&&!t.isOTCEx&&!isBadTicker(t.ticker)
     ).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
     // Sync state.tickers
@@ -260,33 +261,37 @@ async function fireNHOD(ticker,price){
   // Debug log every NHOD candidate so we can see why things get blocked
   console.log(`[NHOD?] ${ticker} $${price.toFixed(4)} chg:${gapper.chgPct.toFixed(1)}% vol:${fmtN(gapper.volume)} rvol:${fmtRVol(gapper.rvol)} lastAlert:${s.lastAlertPrice?'$'+s.lastAlertPrice.toFixed(4):'none'} cooldown:${s.lastAlertTime?Math.round((Date.now()-s.lastAlertTime)/60000)+'m ago':'none'}`);
 
-  // ── Session-based quality gates ─────────────────────────────────────────
+  // ── NuntioBot-style quality gates ────────────────────────────────────────
+  // Based on observed NuntioBot behavior: only fires on low-price,
+  // low-float, high-RVol stocks. Universe is <$5, tiny float, huge RVol.
   const{etMin}=getETInfo();
-  // 4:00AM–6:00AM ET  (etMin 240–360): early pre-market
-  // 6:00AM–4:00PM ET  (etMin 360–960): main session (includes regular PM scan)
-  // 4:00PM–8:00PM ET  (etMin 960–1200): after-hours
+
+  // 1. Universe filter: price must be under $5 (NuntioBot never fires on $10+ stocks)
+  if(price>5)return;
+
+  // 2. RVol must be genuinely unusual — NuntioBot minimum appears to be ~10x
+  if(gapper.rvol<10)return;
+
+  // 3. Session-based volume floor
   if(etMin>=240&&etMin<360){
-    // Early pre-market 4AM–6AM
+    // Early pre-market 4AM–6AM: 10% gain, 100K vol
     if(gapper.chgPct<10)return;
     if(gapper.volume<100000)return;
-    if(gapper.rvol<3)return;
   }else if(etMin>=360&&etMin<960){
-    // Main session 6AM–4PM
+    // Main session 6AM–4PM: 20% gain, 1M vol
     if(gapper.chgPct<20)return;
     if(gapper.volume<1000000)return;
-    if(gapper.rvol<5)return;
   }else{
-    // After-hours 4PM–8PM
+    // After-hours 4PM–8PM: 10% gain, 100K vol
     if(gapper.chgPct<10)return;
     if(gapper.volume<100000)return;
-    if(gapper.rvol<3)return;
   }
 
-  // Must be 10% above last alerted price — no tick-by-tick spam
-  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.10)return;
+  // 4. Must move 8% above last alerted price — no micro-tick spam
+  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.08)return;
 
-  // 15-min cooldown per ticker
-  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<15*60*1000)return;
+  // 5. 10-min cooldown per ticker
+  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<10*60*1000)return;
   // ─────────────────────────────────────────────────────────────────────────
 
   const nhod=(s.nhod||0)+1;
@@ -445,7 +450,8 @@ const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|a
 
 async function pollNews(){
   if(!isActive())return;
-  if(Date.now()-lastNewsPoll<30*1000)return;
+  if(BZ_KEY)return; // skip polling when Benzinga WS is active
+  if(Date.now()-lastNewsPoll<5*1000)return;
   lastNewsPoll=Date.now();
   try{
     const r=await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
@@ -516,6 +522,43 @@ async function checkMorningSnapshot(){
   }).join('\n');
   await post(WH.TOP_GAPPERS,{embeds:[{title:`${etInfo.h===6?'🌅 6AM':'☀️ 7AM'} Pre-Market Hot Gappers`,description:rows||'No data',color:0x00d4ff,footer:{text:`AziziBot · ${etInfo.timeStr} ET · Polygon.io`},timestamp:new Date().toISOString()}]});
   console.log(`[${etInfo.timeStr}] Morning snapshot posted`);
+}
+
+
+// ─── Benzinga News WebSocket — real-time news, sub-second delivery ────────────
+let wsBZ=null;
+function connectBenzingaNewsWS(){
+  if(wsBZ){try{wsBZ.terminate();}catch(e){}}
+  console.log('[BZ News] Connecting...');
+  wsBZ=new WebSocket(`wss://api.benzinga.com/api/v1/news/stream?token=${BZ_KEY}`);
+  wsBZ.on('open',()=>{
+    console.log('[BZ News] Connected — streaming live news');
+    // Send ping every 30s to keep alive
+    wsBZ._bzPing=setInterval(()=>{
+      if(wsBZ.readyState===WebSocket.OPEN)wsBZ.send(JSON.stringify({action:'ping'}));
+    },30000);
+  });
+  wsBZ.on('message',data=>{
+    try{
+      const msg=JSON.parse(data.toString());
+      // Benzinga message format: {id, api_version, kind, data:{action, content:{title, url, stocks:[{name}]}}}
+      if(msg.kind==='news'&&msg.data&&msg.data.content){
+        const n=msg.data.content;
+        const title=n.title||n.headline||'';
+        const url=n.url||n.article_url||'';
+        const tickers=(n.stocks||[]).map(s=>s.name||s.ticker||'').filter(Boolean);
+        if(title&&tickers.length){
+          handleNewsEvent({title,tickers,article_url:url,published_utc:n.created||new Date().toISOString()}).catch(()=>{});
+        }
+      }
+    }catch(e){}
+  });
+  wsBZ.on('error',err=>console.error('[BZ News] Error:',err.message));
+  wsBZ.on('close',()=>{
+    if(wsBZ._bzPing)clearInterval(wsBZ._bzPing);
+    console.log('[BZ News] Closed, reconnecting in 5s...');
+    setTimeout(connectBenzingaNewsWS,5000);
+  });
 }
 
 // ─── Polygon LULD halt WebSocket ──────────────────────────────────────────────
@@ -789,6 +832,7 @@ async function main(){
   await refreshTopGappers();
   connectPriceWS();
   connectHaltWS();
+  if(BZ_KEY)connectBenzingaNewsWS(); else console.warn("[BZ News] No BZ_KEY — using Polygon news poll fallback");
   connectDiscordGateway();
   await registerSlashCommands();
 
