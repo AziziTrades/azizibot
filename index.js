@@ -219,11 +219,12 @@ let lastNewsPoll=0;
 // ─── Gapper refresh ───────────────────────────────────────────────────────────
 async function refreshTopGappers(){
   try{
-    const[pg,pc]=await Promise.all([
+    const[pg,pc,pv]=await Promise.all([
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
       polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=100'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=volume&direction=desc&limit=100'),
     ]);
-    console.log(`[Poly] gainers:${pg?.tickers?.length||0} status:${pg?.status} top100:${pc?.tickers?.length||0} status:${pc?.status}`);
+    console.log(`[Poly] gainers:${pg?.tickers?.length||0} pct100:${pc?.tickers?.length||0} vol100:${pv?.tickers?.length||0}`);
     const{etMin}=getETInfo();
     const build=t=>{
       const lp=(t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
@@ -245,7 +246,7 @@ async function refreshTopGappers(){
              high:(t.day&&t.day.h)||lp,exchange,isOTCEx};
     };
     const merge=new Map();
-    for(const src of[pg,pc])for(const t of((src&&src.tickers)||[]))
+    for(const src of[pg,pc,pv])for(const t of((src&&src.tickers)||[]))
       if(!merge.has(t.ticker))merge.set(t.ticker,build(t));
     topGappers=[...merge.values()].filter(t=>
       t.chgPct>=5&&t.price>=0.1&&t.price<=10&&
@@ -261,6 +262,26 @@ async function refreshTopGappers(){
     }
     console.log(`[${getETInfo().timeStr}] ${topGappers.length} gappers`);
   }catch(e){console.error('refreshTopGappers:',e.message);}
+}
+
+
+// ─── 15-minute green bars check ───────────────────────────────────────────────
+// Returns number of consecutive green 15m bars (close > open)
+async function getGreenBars15m(ticker){
+  try{
+    const now=Date.now();
+    const from=new Date(now-2*60*60*1000).toISOString().slice(0,19)+'Z'; // 2h ago
+    const to=new Date(now).toISOString().slice(0,19)+'Z';
+    const r=await polyGet(`/v2/aggs/ticker/${ticker}/range/15/minute/${from.slice(0,10)}/${to.slice(0,10)}?adjusted=true&sort=desc&limit=10`);
+    const bars=(r&&r.results)||[];
+    if(bars.length<2)return 0;
+    let count=0;
+    for(const bar of bars){
+      if(bar.c>bar.o)count++;
+      else break;
+    }
+    return count;
+  }catch(e){return 0;}
 }
 
 // ─── NHOD Alert — NuntioBot style ─────────────────────────────────────────────
@@ -318,11 +339,12 @@ async function fireNHOD(ticker,price){
 
   console.log(`[${etInfo.timeStr}] NHOD ${ticker} $${price.toFixed(4)} x${nhod} RVol:${fmtRVol(gapper.rvol)}`);
 
-  const[newsUrl,rs,details,fv]=await Promise.all([
+  const[newsUrl,rs,details,fv,greenBars]=await Promise.all([
     getLatestNewsUrl(ticker),
     getRecentSplit(ticker),
     getTickerDetails(ticker),
-    getFinvizStats(ticker)
+    getFinvizStats(ticker),
+    getGreenBars15m(ticker)
   ]);
 
   const mc=details.market_cap||0;
@@ -350,7 +372,8 @@ async function fireNHOD(ticker,price){
   const label=nhod===1?(sessLabel==='PRE-MARKET'?'PMH':sessLabel==='AFTER-HOURS'?'AHs':'NSH'):`${nhod} NHOD`;
   const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
   const flag=countryFlag(ticker);
-  const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
+  const greenStr=greenBars>=2?` · \`${greenBars} green bars 15m\``:''
+  const line=`\`${etInfo.timeStr}\` ↑ ${tLink} \`${priceFlag(price)}\` \`+${gapper.chgPct.toFixed(1)}%\` · ${label}${afterLull}${greenStr} ~ ${flag}${mcStr} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${floatStr}${siStr}${rsStr}${prStr}`;
   await post(WH.TOP_GAPPERS,{content:line});
   await post(WH.TOP_GAPPERS,{content:line});
 }
@@ -602,6 +625,7 @@ function connectBenzingaNewsWS(){
 
 // ─── Polygon LULD halt WebSocket ──────────────────────────────────────────────
 let wsHalt=null;
+const haltAlertTimes=[]; // track recent halt alert timestamps for rate limiting
 function connectHaltWS(){
   if(wsHalt){try{wsHalt.terminate();}catch(e){}}
   wsHalt=new WebSocket('wss://socket.polygon.io/stocks');
@@ -635,12 +659,17 @@ function connectHaltWS(){
           const etInfo=getETInfo();
           const pStr=gapper?` → $${gapper.price.toFixed(4)}`:'';
           const vStr=gapper?` ~ ${fmtN(gapper.volume)} vol`:'';
+          // Rate limit: max 3 halt/resume alerts per 10 seconds (filters market-wide events)
+          const now10=Date.now();
+          haltAlertTimes.push(now10);
+          while(haltAlertTimes.length&&haltAlertTimes[0]<now10-10000)haltAlertTimes.shift();
+          if(haltAlertTimes.length>3)continue; // market-wide event, skip
           getLatestNewsUrl(ticker).then(newsUrl=>{
             const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
             const line=isResume
               ?`\`${etInfo.timeStr}\` ▶️ **RESUMED** ${tLink}${pStr}${vStr}`
               :`\`${etInfo.timeStr}\` ⏸️ **HALTED** ${tLink} | Volatility Pause${pStr}${vStr}`;
-            post(WH.TOP_GAPPERS,{content:line}).then(()=>sleep(300)).then(()=>post(WH.HALT_ALERTS,{content:line}));
+            post(WH.TOP_GAPPERS,{content:line});
             console.log(`[${etInfo.timeStr}] ${isResume?'RESUME':'HALT'}: ${ticker}`);
           });
         }
@@ -894,7 +923,7 @@ async function main(){
   await refreshEtfList();
   await refreshTopGappers();
   connectPriceWS();
-  connectHaltWS();
+  // connectHaltWS(); // disabled — too noisy
   if(BZ_KEY)connectBenzingaNewsWS(); else console.warn("[BZ News] No BZ_KEY — using Polygon news poll fallback");
   connectDiscordGateway();
   await registerSlashCommands();
@@ -915,7 +944,7 @@ async function main(){
     const{h,m}=getETInfo();
     if(h===0&&m<1){state.alertedToday.clear();state.dailyAlertCount.clear();}
     await checkMorningSnapshot();
-    await checkHalts();
+    // await checkHalts(); // disabled — too noisy
     await checkSECFilings();
   },60*1000);
 
