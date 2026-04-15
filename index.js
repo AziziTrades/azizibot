@@ -647,6 +647,7 @@ function connectHaltWS(){
 // ─── Price WebSocket ──────────────────────────────────────────────────────────
 let ws=null;
 const subscribedTickers=new Set();
+const wsDebounce=new Map(); // ticker -> last fireNHOD attempt timestamp
 
 function connectPriceWS(){
   if(ws){try{ws.terminate();}catch(e){}}
@@ -680,8 +681,14 @@ function connectPriceWS(){
           if(!s.priceHistory)s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
           if(s.priceHistory.length>60)s.priceHistory.shift();
-          // Fire NHOD if new high
-          if(price>s.high+0.001)fireNHOD(ticker,price).catch(()=>{});
+          // Fire NHOD if new high — debounced to once per 2 seconds per ticker
+          if(price>s.high+0.001){
+            const lastAttempt=wsDebounce.get(ticker)||0;
+            if(Date.now()-lastAttempt>2000){
+              wsDebounce.set(ticker,Date.now());
+              fireNHOD(ticker,price).catch(()=>{});
+            }
+          }
         }
       }
     }catch(e){}
