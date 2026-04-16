@@ -15,7 +15,7 @@ const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM
 //
 //  EARLY-PRE  4:00–7:00 AM   ≥10% gain   vol = 0   (day.v is near-zero before open)
 //  LATE-PRE   7:00–9:30 AM   ≥20% gain   vol = 0   (still pre-market, vol is thin)
-//  MKT        9:30AM–4:00PM  ≥20% gain   vol ≥ 10M (real market hours, vol built up)
+//  MKT        9:30AM–4:00PM  ≥20% gain   vol ≥ 5M  (real market hours, vol built up)
 //  AH         4:00–8:00 PM   ≥10% gain   vol = 0
 //
 //  Vol is ONLY enforced during regular market hours (MKT).
@@ -27,7 +27,7 @@ const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM
 function getTier(etMin) {
   if(etMin>=240&&etMin<420)  return {name:'EARLY-PRE', minChg:10, minVol:0};
   if(etMin>=420&&etMin<570)  return {name:'LATE-PRE',  minChg:20, minVol:0};
-  if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:20, minVol:10_000_000};
+  if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:20, minVol:5_000_000};
   if(etMin>=960&&etMin<1200) return {name:'AH',        minChg:10, minVol:0};
   return null;
 }
