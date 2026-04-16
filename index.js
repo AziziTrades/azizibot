@@ -12,22 +12,13 @@ const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57U
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
 // ─── Session tiers ────────────────────────────────────────────────────────────
-//  4:00–7:00 AM  (etMin 240–420)  early pre-market  ≥10%  ≥100K vol
-//  7:00–9:30 AM  (etMin 420–570)  late  pre-market  ≥30%  ≥1M   vol
-//  9:30 AM–4 PM  (etMin 570–960)  market hours      ≥20%  ≥10M  vol
-//  4:00–8:00 PM  (etMin 960–1200) after-hours       ≥10%  ≥100K vol  (same as early pre)
+// EARLY-PRE  4:00–7:00 AM  ≥10% chg  prevDay.v ≥100K  (today vol is tiny at 7AM)
+// LATE-PRE   7:00–9:30 AM  ≥30% chg  day.v     ≥1M
+// MKT        9:30–4:00 PM  ≥20% chg  day.v     ≥10M
+// AH         4:00–8:00 PM  ≥10% chg  prevDay.v ≥100K
 //
-// dayWatchlist: any ticker that qualifies 4AM–4PM is locked in ALL DAY.
-// Watchlist-only tickers bypass session gates — only new-high + cooldown apply.
-// Used for PRs, filings, and NHOD bounces throughout the full session.
-
-function sessionRules(etMin) {
-  if(etMin >= 240 && etMin < 420)  return { minChg: 10,  minVol: 100_000,    label: 'EARLY-PRE' };
-  if(etMin >= 420 && etMin < 570)  return { minChg: 30,  minVol: 1_000_000,  label: 'LATE-PRE'  };
-  if(etMin >= 570 && etMin < 960)  return { minChg: 20,  minVol: 10_000_000, label: 'MKT'       };
-  if(etMin >= 960 && etMin < 1200) return { minChg: 10,  minVol: 100_000,    label: 'AH'        };
-  return null; // market closed
-}
+// dayWatchlist: 4AM–4PM lock-in. Stays active all day for NHOD bounces,
+// PRs, and filings. Watchlist tickers skip session gates entirely.
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
@@ -45,13 +36,13 @@ function getET() {
   return { hh, m, s, etMin, timeStr, sess };
 }
 
-function isActive()  { return !!sessionRules(getET().etMin); }
-function sleep(ms)   { return new Promise(r => setTimeout(r, ms)); }
-function fmtN(n)     { if(!n||isNaN(n))return'--'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'K'; return String(n); }
-function fmtRVol(r)  { if(!r||isNaN(r)||r===0)return'--'; if(r>=1000)return Math.round(r).toLocaleString()+'x'; if(r>=10)return r.toFixed(0)+'x'; return r.toFixed(1)+'x'; }
+function isActive() { const {etMin}=getET(); return etMin>=240&&etMin<1200; }
+function sleep(ms)  { return new Promise(r=>setTimeout(r,ms)); }
+function fmtN(n)    { if(!n||isNaN(n))return'--'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'K'; return String(n); }
+function fmtRVol(r) { if(!r||isNaN(r)||r===0)return'--'; if(r>=1000)return Math.round(r).toLocaleString()+'x'; if(r>=10)return r.toFixed(0)+'x'; return r.toFixed(1)+'x'; }
 function priceFlag(p){ if(p<0.50)return'<$.50c'; if(p<1)return'<$1'; if(p<2)return'<$2'; if(p<5)return'<$5'; return'<$10'; }
 function flag(ticker){
-  const c = countryMap.get(ticker);
+  const c=countryMap.get(ticker);
   if(c==='IL')return'🇮🇱'; if(c==='CN')return'🇨🇳'; if(c==='GB')return'🇬🇧'; if(c==='CA')return'🇨🇦';
   return'🇺🇸';
 }
@@ -67,27 +58,27 @@ function isBadTicker(t) {
 
 // ─── HTTP / API ───────────────────────────────────────────────────────────────
 function rawGet(url, hdrs={}) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {headers:{'User-Agent':'AziziBot/1.0',...hdrs}}, res => {
+  return new Promise((resolve,reject)=>{
+    const req=https.get(url,{headers:{'User-Agent':'AziziBot/1.0',...hdrs}},res=>{
       let d=''; res.on('data',c=>d+=c); res.on('end',()=>resolve(d));
     });
-    req.on('error', reject);
-    req.setTimeout(8000, ()=>{ req.destroy(); reject(new Error('timeout')); });
+    req.on('error',reject);
+    req.setTimeout(8000,()=>{req.destroy();reject(new Error('timeout'));});
   });
 }
-async function jsonGet(url) { try { return JSON.parse(await rawGet(url)); } catch(e) { return null; } }
-function polyGet(path) {
-  const sep = path.includes('?') ? '&' : '?';
+async function jsonGet(url){try{return JSON.parse(await rawGet(url));}catch(e){return null;}}
+function polyGet(path){
+  const sep=path.includes('?')?'&':'?';
   return jsonGet(`https://api.polygon.io${path}${sep}apiKey=${POLY_KEY}`);
 }
-async function postToWebhook(url, payload) {
-  return new Promise(resolve => {
-    const body = JSON.stringify(payload);
-    const u    = new URL(url);
-    const req  = https.request({
-      hostname:u.hostname, path:u.pathname+u.search, method:'POST',
+async function postToWebhook(url,payload){
+  return new Promise(resolve=>{
+    const body=JSON.stringify(payload);
+    const u=new URL(url);
+    const req=https.request({
+      hostname:u.hostname,path:u.pathname+u.search,method:'POST',
       headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}
-    }, res => {
+    },res=>{
       let d=''; res.on('data',c=>d+=c);
       res.on('end',()=>{
         if(res.statusCode!==204&&res.statusCode!==200)
@@ -95,367 +86,384 @@ async function postToWebhook(url, payload) {
         resolve(res.statusCode);
       });
     });
-    req.on('error', e=>{ console.error('[Webhook] error:',e.message); resolve(0); });
-    req.setTimeout(5000, ()=>{ req.destroy(); resolve(0); });
+    req.on('error',e=>{console.error('[Webhook] error:',e.message);resolve(0);});
+    req.setTimeout(5000,()=>{req.destroy();resolve(0);});
     req.write(body); req.end();
   });
 }
-async function post(payload) {
-  payload.username = 'AziziBot';
-  await postToWebhook(MAIN_CHAT_WH, payload);
+async function post(payload){
+  payload.username='AziziBot';
+  await postToWebhook(MAIN_CHAT_WH,payload);
 }
-function discordRest(method, path, body=null) {
-  return new Promise((resolve, reject) => {
-    const data = body ? JSON.stringify(body) : null;
-    const req  = https.request({
-      hostname:'discord.com', path:`/api/v10${path}`, method,
+function discordRest(method,path,body=null){
+  return new Promise((resolve,reject)=>{
+    const data=body?JSON.stringify(body):null;
+    const req=https.request({
+      hostname:'discord.com',path:`/api/v10${path}`,method,
       headers:{'Authorization':`Bot ${DISCORD_TOKEN}`,'Content-Type':'application/json',...(data?{'Content-Length':Buffer.byteLength(data)}:{})}
-    }, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch(e){resolve({});} }); });
-    req.on('error', reject);
+    },res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>{try{resolve(JSON.parse(d));}catch(e){resolve({});}});});
+    req.on('error',reject);
     if(data) req.write(data);
     req.end();
   });
 }
 
 // ─── ETF list ─────────────────────────────────────────────────────────────────
-const ETF_FALLBACK = new Set(['SPY','QQQ','IWM','DIA','GLD','SLV','TLT','HYG','VXX','UVXY',
+const ETF_FALLBACK=new Set(['SPY','QQQ','IWM','DIA','GLD','SLV','TLT','HYG','VXX','UVXY',
   'SQQQ','TQQQ','SPXU','SPXL','SOXL','SOXS','TECL','TECS','LABD','LABU','NUGT','DUST',
   'FAS','FAZ','TNA','TZA','UPRO','SDOW','UDOW','GUSH','DRIP','ERX','ERY','BOIL','KOLD',
   'ARKK','ARKG','ARKW','ARKF','GDX','GDXJ','XLF','XLE','XLK','XLV','XLI','XLP','XLU',
   'VTI','VOO','IVV','IJR','IJH']);
-let etfSet = new Set(ETF_FALLBACK);
-let lastEtfRefresh = 0;
-async function refreshEtfList() {
-  if(Date.now()-lastEtfRefresh < 6*60*60*1000) return;
-  try {
-    let path = '/v3/reference/tickers?type=ETF&market=stocks&active=true&limit=1000';
-    const s  = new Set(ETF_FALLBACK);
-    let pages = 0;
-    while(path && pages < 5) {
-      const r = await polyGet(path);
+let etfSet=new Set(ETF_FALLBACK);
+let lastEtfRefresh=0;
+async function refreshEtfList(){
+  if(Date.now()-lastEtfRefresh<6*60*60*1000) return;
+  try{
+    let path='/v3/reference/tickers?type=ETF&market=stocks&active=true&limit=1000';
+    const s=new Set(ETF_FALLBACK);
+    let pages=0;
+    while(path&&pages<5){
+      const r=await polyGet(path);
       if(!r||!r.results) break;
       r.results.forEach(t=>s.add(t.ticker));
-      path = r.next_url ? r.next_url.replace('https://api.polygon.io','') : null;
+      path=r.next_url?r.next_url.replace('https://api.polygon.io',''):null;
       pages++;
     }
-    if(s.size > 100) { etfSet = s; lastEtfRefresh = Date.now(); console.log(`[ETF] ${s.size} tickers loaded`); }
-  } catch(e) { console.error('[ETF] refresh failed:', e.message); }
+    if(s.size>100){etfSet=s;lastEtfRefresh=Date.now();console.log(`[ETF] ${s.size} tickers loaded`);}
+  }catch(e){console.error('[ETF] refresh failed:',e.message);}
 }
-function isEtf(t) { return etfSet.has(t); }
+function isEtf(t){return etfSet.has(t);}
 
 // ─── Caches ───────────────────────────────────────────────────────────────────
-const countryMap  = new Map();
-const tickerCache = new Map();
-const newsCache   = new Map();
+const countryMap =new Map();
+const tickerCache=new Map();
+const newsCache  =new Map();
 
-async function getTickerDetails(ticker) {
-  const c = tickerCache.get(ticker);
-  if(c && Date.now()-c.ts < 4*60*60*1000) return c.data;
-  try {
-    const r    = await polyGet(`/v3/reference/tickers/${ticker}`);
-    const data = (r&&r.results) || {};
-    tickerCache.set(ticker, {data, ts:Date.now()});
-    if(data.locale) countryMap.set(ticker, data.locale.toUpperCase());
+async function getTickerDetails(ticker){
+  const c=tickerCache.get(ticker);
+  if(c&&Date.now()-c.ts<4*60*60*1000) return c.data;
+  try{
+    const r=await polyGet(`/v3/reference/tickers/${ticker}`);
+    const data=(r&&r.results)||{};
+    tickerCache.set(ticker,{data,ts:Date.now()});
+    if(data.locale) countryMap.set(ticker,data.locale.toUpperCase());
     return data;
-  } catch(e) { return {}; }
+  }catch(e){return {};}
 }
-async function getNewsUrl(ticker) {
-  const c = newsCache.get(ticker);
-  if(c && Date.now()-c.ts < 15*60*1000) return c.url;
-  try {
-    const r    = await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
-    const item = r&&r.results&&r.results[0];
+async function getNewsUrl(ticker){
+  const c=newsCache.get(ticker);
+  if(c&&Date.now()-c.ts<15*60*1000) return c.url;
+  try{
+    const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=1&order=desc&sort=published_utc`);
+    const item=r&&r.results&&r.results[0];
     if(!item) return null;
-    if(new Date(item.published_utc||0).getTime() < new Date().setHours(0,0,0,0)) return null;
-    const url = item.article_url||null;
-    if(url) newsCache.set(ticker, {url, ts:Date.now()});
+    if(new Date(item.published_utc||0).getTime()<new Date().setHours(0,0,0,0)) return null;
+    const url=item.article_url||null;
+    if(url) newsCache.set(ticker,{url,ts:Date.now()});
     return url;
-  } catch(e) { return null; }
+  }catch(e){return null;}
 }
-async function getRecentSplit(ticker) {
-  try {
-    const r = await polyGet(`/v3/reference/splits?ticker=${ticker}&limit=5&order=desc`);
-    const s = (r&&r.results||[]).find(s=>{
-      const d = (Date.now()-new Date(s.execution_date).getTime())/86400000;
-      return d<=90 && s.split_from>s.split_to;
+async function getRecentSplit(ticker){
+  try{
+    const r=await polyGet(`/v3/reference/splits?ticker=${ticker}&limit=5&order=desc`);
+    const s=(r&&r.results||[]).find(s=>{
+      const d=(Date.now()-new Date(s.execution_date).getTime())/86400000;
+      return d<=90&&s.split_from>s.split_to;
     });
-    if(s){ const d=new Date(s.execution_date); return`${s.split_to} for ${s.split_from} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`; }
-  } catch(e) {}
+    if(s){const d=new Date(s.execution_date);return`${s.split_to} for ${s.split_from} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`;}
+  }catch(e){}
   return null;
 }
-async function getFinvizStats(ticker) {
-  const r = {si:'--', float:'--', io:'--'};
-  try {
-    const html = await rawGet(`https://finviz.com/quote.ashx?t=${ticker}`, {
+async function getFinvizStats(ticker){
+  const r={si:'--',float:'--',io:'--'};
+  try{
+    const html=await rawGet(`https://finviz.com/quote.ashx?t=${ticker}`,{
       'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept':'text/html','Accept-Language':'en-US,en;q=0.5'
     });
-    if(html.length > 1000) {
-      const fm = html.match(/Shs Float<\/b><\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||html.match(/Shs Float[^<]*<\/td>[^<]*<td[^>]*>([^<]+)<\/td>/i);
+    if(html.length>1000){
+      const fm=html.match(/Shs Float<\/b><\/td>\s*<td[^>]*>([^<]+)<\/td>/i)||html.match(/Shs Float[^<]*<\/td>[^<]*<td[^>]*>([^<]+)<\/td>/i);
       if(fm&&fm[1]&&fm[1]!=='-') r.float=fm[1].trim();
-      const sm = html.match(/Short Float[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Short Float[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
+      const sm=html.match(/Short Float[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Short Float[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
       if(sm&&sm[1]&&sm[1]!=='-') r.si=sm[1].includes('%')?sm[1].trim():sm[1].trim()+'%';
-      const im = html.match(/Inst Own[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Inst Own[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
+      const im=html.match(/Inst Own[^<]*<\/b><\/td>\s*<td[^>]*>([\d.]+%?)<\/td>/i)||html.match(/Inst Own[^<]*<\/td>[^<]*<td[^>]*>([\d.]+%?)<\/td>/i);
       if(im&&im[1]&&im[1]!=='-') r.io=im[1].includes('%')?im[1].trim():im[1].trim()+'%';
     }
-  } catch(e) {}
-  if(r.float==='--') {
-    try {
-      const det = await getTickerDetails(ticker);
-      const sh  = det.share_class_shares_outstanding||det.weighted_shares_outstanding||0;
+  }catch(e){}
+  if(r.float==='--'){
+    try{
+      const det=await getTickerDetails(ticker);
+      const sh=det.share_class_shares_outstanding||det.weighted_shares_outstanding||0;
       if(sh>0) r.float=fmtN(sh)+' (out)';
-    } catch(e) {}
+    }catch(e){}
   }
   return r;
 }
-async function getGreenBars(ticker) {
-  try {
-    const today = new Date().toISOString().slice(0,10);
-    const r     = await polyGet(`/v2/aggs/ticker/${ticker}/range/1/minute/${today}/${today}?adjusted=true&sort=desc&limit=10`);
-    const bars  = (r&&r.results)||[];
-    let count   = 0;
-    for(const bar of bars){ if(bar.c>bar.o) count++; else break; }
+async function getGreenBars(ticker){
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    const r=await polyGet(`/v2/aggs/ticker/${ticker}/range/1/minute/${today}/${today}?adjusted=true&sort=desc&limit=10`);
+    const bars=(r&&r.results)||[];
+    let count=0;
+    for(const bar of bars){if(bar.c>bar.o)count++;else break;}
     return count;
-  } catch(e){ return 0; }
+  }catch(e){return 0;}
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
-let topGappers = [];
-
-// dayWatchlist: locked in between 4AM–4PM. After 4PM nothing new is added but
-// existing watchlist keeps receiving PR / filing / NHOD bounce alerts.
-// Shape: ticker → { ticker, chgPct, volume, rvol, price, high, lockedAt }
-const dayWatchlist = new Map();
-
-const state = {
-  tickers:      new Map(),
-  dailyCounts:  new Map(),
-  sentNews:     new Set(),
-  sentFilings:  new Set(),
-  sentPR:       new Set(),
+let topGappers=[];
+const dayWatchlist=new Map(); // ticker → {ticker,chgPct,volume,rvol,price,high,lockedAt}
+const state={
+  tickers:     new Map(),
+  dailyCounts: new Map(),
+  sentNews:    new Set(),
+  sentFilings: new Set(),
+  sentPR:      new Set(),
   morningPosted:new Set(),
 };
-const wsDebounce = new Map();
+const wsDebounce=new Map();
 
-// ─── Top Gappers refresh ──────────────────────────────────────────────────────
-async function refreshGappers() {
-  try {
-    const { etMin, timeStr } = getET();
-    const rules = sessionRules(etMin);
-    if(!rules) return; // market closed
+// ─── Gapper refresh ───────────────────────────────────────────────────────────
+async function refreshGappers(){
+  try{
+    const {etMin,timeStr}=getET();
+    if(!isActive()) return;
 
-    const [g1, g2, g3] = await Promise.all([
+    const [g1,g2,g3]=await Promise.all([
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
       polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=250'),
       polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=volume&direction=desc&limit=250'),
     ]);
 
-    const c1=g1?.tickers?.length||0, c2=g2?.tickers?.length||0, c3=g3?.tickers?.length||0;
+    const c1=g1?.tickers?.length||0,c2=g2?.tickers?.length||0,c3=g3?.tickers?.length||0;
     console.log(`[Poly] gainers:${c1} pct:${c2} vol:${c3}`);
-    if(c1===0&&c2===0&&c3===0){ console.error('[Poly] ALL EMPTY — check POLY_KEY'); return; }
+    if(c1===0&&c2===0&&c3===0){console.error('[Poly] ALL EMPTY — check POLY_KEY');return;}
 
-    const build = t => {
-      const price  = (t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
-      const prev   = (t.prevDay&&t.prevDay.c)||0;
-      const chgPct = price&&prev?((price-prev)/prev)*100:(t.todaysChangePerc||0);
-      const vol    = (t.day&&t.day.v)||0;
-      const pv2    = (t.prevDay&&t.prevDay.v)||0;
-      const mins   = Math.max(etMin-240,1);
-      const rvol   = pv2>0?(vol*390)/(mins*pv2):vol>0?5:0;
-      const exch   = t.primaryExchange||'';
-      const isOTC  = /OTC|GREY|PINK|EXPERT/i.test(exch);
-      return { ticker:t.ticker, price, prev, chgPct, volume:vol, prevVol:pv2, rvol,
-               high:(t.day&&t.day.h)||price, isOTC, exch };
+    const build=t=>{
+      const price =(t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
+      const prev  =(t.prevDay&&t.prevDay.c)||0;
+      const chgPct=price&&prev?((price-prev)/prev)*100:(t.todaysChangePerc||0);
+      const vol   =(t.day&&t.day.v)||0;       // today's accumulated volume
+      const pv2   =(t.prevDay&&t.prevDay.v)||0; // yesterday's full-day volume
+      const mins  =Math.max(etMin-240,1);
+      const rvol  =pv2>0?(vol*390)/(mins*pv2):0;
+      const exch  =t.primaryExchange||'';
+      const isOTC =/OTC|GREY|PINK|EXPERT/i.test(exch);
+      return {ticker:t.ticker,price,prev,chgPct,volume:vol,prevVol:pv2,rvol,
+              high:(t.day&&t.day.h)||price,isOTC,exch};
     };
 
-    const merge = new Map();
+    const merge=new Map();
     for(const src of [g1,g2,g3])
       for(const t of ((src&&src.tickers)||[]))
         if(t.ticker&&!merge.has(t.ticker)) merge.set(t.ticker,build(t));
 
-    // ── Apply current session's tier rules ────────────────────────────────
-    const { minChg, minVol, label } = rules;
-    const rejected = { pct:0, price_low:0, price_high:0, vol:0, otc:0, etf:0, bad:0 };
-    const newGappers = [...merge.values()].filter(t => {
-      if(t.chgPct  < minChg)    { rejected.pct++;        return false; }
-      if(t.price   < 0.10)      { rejected.price_low++;  return false; }
-      if(t.price   > 10)        { rejected.price_high++; return false; }
-      if(t.volume  < minVol)    { rejected.vol++;         return false; }
-      if(t.isOTC)               { rejected.otc++;         return false; }
-      if(isEtf(t.ticker))       { rejected.etf++;         return false; }
-      if(isBadTicker(t.ticker)) { rejected.bad++;         return false; }
+    // ── Session-aware filter ──────────────────────────────────────────────
+    // EARLY-PRE / AH: use prevDay.v for vol check.
+    //   At 7AM, day.v is near zero even for big movers. prevDay.v ≥ 100K
+    //   confirms the stock is real and liquid.
+    // LATE-PRE / MKT: use day.v (enough time has passed for volume to build).
+    //
+    let label,minChg,volCheck;
+    if(etMin>=240&&etMin<420){
+      // 4AM–7AM EARLY-PRE
+      label='EARLY-PRE'; minChg=10;
+      volCheck=t=>t.prevVol>=100_000;
+    } else if(etMin>=420&&etMin<570){
+      // 7AM–9:30AM LATE-PRE
+      label='LATE-PRE'; minChg=30;
+      volCheck=t=>t.volume>=1_000_000;
+    } else if(etMin>=570&&etMin<960){
+      // 9:30AM–4PM MKT
+      label='MKT'; minChg=20;
+      volCheck=t=>t.volume>=10_000_000;
+    } else {
+      // 4PM–8PM AH
+      label='AH'; minChg=10;
+      volCheck=t=>t.prevVol>=100_000;
+    }
+
+    const rejected={pct:0,price_low:0,price_high:0,vol:0,otc:0,etf:0,bad:0};
+    const newGappers=[...merge.values()].filter(t=>{
+      if(t.chgPct <minChg)       {rejected.pct++;       return false;}
+      if(t.price  <0.10)         {rejected.price_low++; return false;}
+      if(t.price  >10)           {rejected.price_high++;return false;}
+      if(!volCheck(t))           {rejected.vol++;        return false;}
+      if(t.isOTC)                {rejected.otc++;        return false;}
+      if(isEtf(t.ticker))        {rejected.etf++;        return false;}
+      if(isBadTicker(t.ticker))  {rejected.bad++;        return false;}
       return true;
     }).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
 
-    console.log(`[${label}] from ${merge.size}: passed=${newGappers.length} | chg<${minChg}%:${rejected.pct} p<0.10:${rejected.price_low} p>10:${rejected.price_high} vol<${fmtN(minVol)}:${rejected.vol} OTC:${rejected.otc} ETF:${rejected.etf}`);
-    if(newGappers.length > 0)
-      console.log(`[Gappers] ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,${fmtN(g.volume)})`).join(' ')}`);
+    const volDesc=label==='EARLY-PRE'||label==='AH'?'prevVol≥100K':'dayVol≥'+(label==='LATE-PRE'?'1M':'10M');
+    console.log(`[${label}] from ${merge.size}: passed=${newGappers.length} | chg<${minChg}%:${rejected.pct} p<0.10:${rejected.price_low} p>10:${rejected.price_high} ${volDesc}:${rejected.vol} OTC:${rejected.otc} ETF:${rejected.etf}`);
+    if(newGappers.length>0)
+      console.log(`[Gappers] ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,dayV:${fmtN(g.volume)},prevV:${fmtN(g.prevVol)})`).join(' ')}`);
     // ─────────────────────────────────────────────────────────────────────
 
-    topGappers = newGappers;
+    topGappers=newGappers;
 
-    // ── Lock into dayWatchlist during 4AM–4PM only ────────────────────────
-    // After 4PM, no new tickers are added — but existing ones stay.
-    const lockWindow = etMin >= 240 && etMin < 960;
-    if(lockWindow) {
-      for(const g of topGappers) {
-        if(!dayWatchlist.has(g.ticker)) {
-          dayWatchlist.set(g.ticker, {
-            ticker:g.ticker, chgPct:g.chgPct, volume:g.volume,
-            rvol:g.rvol, price:g.price, high:g.high,
-            lockedAt: label,
-          });
-          console.log(`[Watch] +${g.ticker} +${g.chgPct.toFixed(1)}% vol:${fmtN(g.volume)} [${label}]`);
+    // Lock into dayWatchlist during 4AM–4PM only
+    const lockWindow=etMin>=240&&etMin<960;
+    if(lockWindow){
+      for(const g of topGappers){
+        if(!dayWatchlist.has(g.ticker)){
+          dayWatchlist.set(g.ticker,{ticker:g.ticker,chgPct:g.chgPct,volume:g.volume,
+            rvol:g.rvol,price:g.price,high:g.high,lockedAt:label});
+          console.log(`[Watch] +${g.ticker} +${g.chgPct.toFixed(1)}% dayV:${fmtN(g.volume)} prevV:${fmtN(g.prevVol)} [${label}]`);
         }
       }
     }
-    // ─────────────────────────────────────────────────────────────────────
 
-    // Sync state.tickers for live gappers
-    for(const g of topGappers) {
-      const ex = state.tickers.get(g.ticker)||{high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
-      state.tickers.set(g.ticker, {...ex,...g, high:Math.max(g.high,ex.high)});
+    // Sync state.tickers
+    for(const g of topGappers){
+      const ex=state.tickers.get(g.ticker)||{high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
+      state.tickers.set(g.ticker,{...ex,...g,high:Math.max(g.high,ex.high)});
     }
-    // Ensure watchlist tickers always have a state entry
-    for(const [ticker,g] of dayWatchlist) {
+    for(const [ticker,g] of dayWatchlist){
       if(!state.tickers.has(ticker))
-        state.tickers.set(ticker, {high:g.high,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]});
+        state.tickers.set(ticker,{high:g.high,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]});
     }
 
     console.log(`[${timeStr}] ${topGappers.length} live | ${dayWatchlist.size} watchlist | ${label}`);
-  } catch(e) { console.error('[refreshGappers] CRASH:', e.message, e.stack); }
+  }catch(e){console.error('[refreshGappers] CRASH:',e.message,e.stack);}
 }
 
 // ─── NHOD Alert ───────────────────────────────────────────────────────────────
-async function fireNHOD(ticker, price) {
+async function fireNHOD(ticker,price){
   if(!isActive()) return;
 
-  const liveGapper  = topGappers.find(g=>g.ticker===ticker);
-  const watchGapper = dayWatchlist.get(ticker);
-  const gapper      = liveGapper || watchGapper;
-  const isWatchOnly = !liveGapper && !!watchGapper;
+  const liveGapper =topGappers.find(g=>g.ticker===ticker);
+  const watchGapper=dayWatchlist.get(ticker);
+  const gapper     =liveGapper||watchGapper;
+  const isWatchOnly=!liveGapper&&!!watchGapper;
   if(!gapper) return;
 
-  const s = state.tickers.get(ticker);
-  if(!s)                    { console.log(`[NHOD] ${ticker} skip: no state`); return; }
-  if(price <= s.high+0.001) { console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`); return; }
+  const s=state.tickers.get(ticker);
+  if(!s)                   {console.log(`[NHOD] ${ticker} skip: no state`);return;}
+  if(price<=s.high+0.001)  {console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`);return;}
 
-  const { etMin, timeStr } = getET();
+  const {etMin,timeStr}=getET();
 
-  // ── Price range ───────────────────────────────────────────────────────
-  if(price > 10)   { console.log(`[NHOD] ${ticker} skip: price > $10`); return; }
-  if(price < 0.10) { console.log(`[NHOD] ${ticker} skip: price < $0.10`); return; }
+  if(price>10)   {console.log(`[NHOD] ${ticker} skip: price>$10`);return;}
+  if(price<0.10) {console.log(`[NHOD] ${ticker} skip: price<$0.10`);return;}
 
-  // ── Session gates — only for live (non-watchlist) tickers ────────────
-  if(!isWatchOnly) {
-    const rules = sessionRules(etMin);
-    if(!rules) return;
-    if(gapper.chgPct < rules.minChg) {
-      console.log(`[NHOD] ${ticker} skip: ${rules.label} chg ${gapper.chgPct.toFixed(1)}% < ${rules.minChg}%`); return;
+  // Session gates — only for live tickers, not watchlist-only
+  if(!isWatchOnly){
+    if(etMin>=240&&etMin<420){
+      // EARLY-PRE: gain gate; vol already checked via prevDay at admission
+      if(gapper.chgPct<10){console.log(`[NHOD] ${ticker} skip: EARLY-PRE chg ${gapper.chgPct.toFixed(1)}%<10%`);return;}
+    } else if(etMin>=420&&etMin<570){
+      if(gapper.chgPct<30)       {console.log(`[NHOD] ${ticker} skip: LATE-PRE chg ${gapper.chgPct.toFixed(1)}%<30%`);return;}
+      if(gapper.volume<1_000_000){console.log(`[NHOD] ${ticker} skip: LATE-PRE vol ${fmtN(gapper.volume)}<1M`);return;}
+    } else if(etMin>=570&&etMin<960){
+      if(gapper.chgPct<20)        {console.log(`[NHOD] ${ticker} skip: MKT chg ${gapper.chgPct.toFixed(1)}%<20%`);return;}
+      if(gapper.volume<10_000_000){console.log(`[NHOD] ${ticker} skip: MKT vol ${fmtN(gapper.volume)}<10M`);return;}
+    } else {
+      // AH
+      if(gapper.chgPct<10){console.log(`[NHOD] ${ticker} skip: AH chg ${gapper.chgPct.toFixed(1)}%<10%`);return;}
     }
-    if(gapper.volume < rules.minVol) {
-      console.log(`[NHOD] ${ticker} skip: ${rules.label} vol ${fmtN(gapper.volume)} < ${fmtN(rules.minVol)}`); return;
-    }
   }
-  // Watchlist-only: skip session gates entirely — bounce/PR/NHOD all day
 
-  // ── Cooldown / repeat gates ───────────────────────────────────────────
-  if(s.lastAlertPrice>0 && price < s.lastAlertPrice*1.075) {
-    console.log(`[NHOD] ${ticker} skip: need 7.5% above last $${s.lastAlertPrice.toFixed(4)}`); return;
+  if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.075){
+    console.log(`[NHOD] ${ticker} skip: need 7.5% above last $${s.lastAlertPrice.toFixed(4)}`);return;
   }
-  if(s.lastAlertTime>0 && Date.now()-s.lastAlertTime < 5*60*1000) {
-    console.log(`[NHOD] ${ticker} skip: 5-min cooldown`); return;
+  if(s.lastAlertTime>0&&Date.now()-s.lastAlertTime<5*60*1000){
+    console.log(`[NHOD] ${ticker} skip: 5-min cooldown`);return;
   }
-  if((state.dailyCounts.get(ticker)||0) >= 3) {
-    console.log(`[NHOD] ${ticker} skip: max 3/day`); return;
+  if((state.dailyCounts.get(ticker)||0)>=3){
+    console.log(`[NHOD] ${ticker} skip: max 3/day`);return;
   }
-  // ─────────────────────────────────────────────────────────────────────
 
-  const nhod = (s.nhod||0)+1;
-  state.tickers.set(ticker, {...s, high:price, nhod, lastAlertPrice:price, lastAlertTime:Date.now(), priceHistory:s.priceHistory||[]});
-  state.dailyCounts.set(ticker, (state.dailyCounts.get(ticker)||0)+1);
+  const nhod=(s.nhod||0)+1;
+  state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
+  state.dailyCounts.set(ticker,(state.dailyCounts.get(ticker)||0)+1);
   console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
 
-  const [newsUrl, rs, det, fv, greenBars] = await Promise.all([
-    getNewsUrl(ticker), getRecentSplit(ticker), getTickerDetails(ticker),
-    getFinvizStats(ticker), getGreenBars(ticker),
+  const [newsUrl,rs,det,fv,greenBars]=await Promise.all([
+    getNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),
+    getFinvizStats(ticker),getGreenBars(ticker),
   ]);
 
-  const mc       = det.market_cap||0;
-  const rsStr    = rs?` | ${rs}`:'';
-  const regSHO   = fv.si!=='--'&&parseFloat(fv.si)>50?' | 🔴 Reg SHO':'';
-  const greenStr = greenBars>=2?` · **${greenBars} green bars 1m**`:'';
+  const mc      =det.market_cap||0;
+  const rsStr   =rs?` | ${rs}`:'';
+  const regSHO  =fv.si!=='--'&&parseFloat(fv.si)>50?' | 🔴 Reg SHO':'';
+  const greenStr=greenBars>=2?` · **${greenBars} green bars 1m**`:'';
 
-  const hist = (state.tickers.get(ticker)||{}).priceHistory||[];
+  const hist=(state.tickers.get(ticker)||{}).priceHistory||[];
   let afterLull='';
   if(hist.length>=10){
     const old=hist.filter(h=>h.time<Date.now()-10*60*1000);
     if(old.length>=3){
-      const oH=Math.max(...old.map(h=>h.price)), oL=Math.min(...old.map(h=>h.price));
+      const oH=Math.max(...old.map(h=>h.price)),oL=Math.min(...old.map(h=>h.price));
       if((oH-oL)/oL<0.02&&price>oH*1.03) afterLull=' · `after-lull`';
     }
   }
 
-  const prData    = newsCache.get(ticker);
-  const prStr     = prData&&(Date.now()-prData.ts)<15*60*1000?` | [PR+](<${prData.url}>)`:'';
-  const {sess}    = getET();
-  const sessLabel = nhod===1?(sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH'):`${nhod} NHOD`;
-  const tLink     = newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
-  const pctStr    = `+${gapper.chgPct.toFixed(1)}%`;
-  const mcLine    = mc>0?` | MC: ${fmtN(mc)}`:'';
-  const extraLine = [
+  const prData  =newsCache.get(ticker);
+  const prStr   =prData&&(Date.now()-prData.ts)<15*60*1000?` | [PR+](<${prData.url}>)`:'';
+  const {sess}  =getET();
+  const sessLabel=nhod===1?(sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH'):`${nhod} NHOD`;
+  const tLink   =newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
+  const pctStr  =`+${gapper.chgPct.toFixed(1)}%`;
+  const mcLine  =mc>0?` | MC: ${fmtN(mc)}`:'';
+  const extraLine=[
     fv.float!=='--'?`Float: ${fv.float}`:'',
     fv.si!=='--'?`SI: ${fv.si}`:'',
     fv.io!=='--'?`IO: ${fv.io}`:'',
   ].filter(Boolean).join(' | ');
-  const extraStr  = extraLine?`\n> ${extraLine}`:'';
-  const line = `\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
+  const extraStr=extraLine?`\n> ${extraLine}`:'';
+  const line=`\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
   await post({content:line});
   console.log(`[ALERT] posted OK`);
 }
 
 // ─── News / PR alerts ─────────────────────────────────────────────────────────
-const DROP_RE  = /offering|public offering|convertible|shelf|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|debenture|equity financ/i;
-const SPIKE_RE = /collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
+const DROP_RE =/offering|public offering|convertible|shelf|ATM offering|at-the-market|direct offering|registered direct|dilut|warrant|prospectus|424B|S-1|S-3|secondary offering|note offering|senior notes|debenture|equity financ/i;
+const SPIKE_RE=/collaboration|agreement|partnership|FDA|approval|cleared|grant|award|contract|trial|data|results|positive|breakthrough|milestone|license|acqui|merger|acquisition|joint venture|phase|cohort|study|efficacy|safety/i;
 
-async function handleNewsItem(title, tickers, url, published_utc) {
+async function handleNewsItem(title,tickers,url,published_utc){
   if(!title||!tickers.length) return;
-  const id = (url||title).slice(0,100);
+  const id=(url||title).slice(0,100);
   if(state.sentNews.has(id)) return;
   state.sentNews.add(id);
   for(const t of tickers) if(url) newsCache.set(t,{url,ts:Date.now()});
 
-  const isDrop  = DROP_RE.test(title);
-  const isSpike = !isDrop&&SPIKE_RE.test(title);
+  const isDrop =DROP_RE.test(title);
+  const isSpike=!isDrop&&SPIKE_RE.test(title);
   if(!isDrop&&!isSpike) return;
 
-  const {timeStr,etMin} = getET();
-  const rules    = sessionRules(etMin);
-  const prVolMin = rules ? rules.minVol : 0;
+  const {timeStr,etMin}=getET();
 
-  for(const ticker of tickers.slice(0,3)) {
+  // PR vol floor: same logic — EARLY-PRE/AH use 0 (can't check prevVol here easily),
+  // LATE-PRE uses 1M, MKT uses 10M. Keep it simple.
+  let prVolMin=0;
+  if(etMin>=420&&etMin<570)      prVolMin=1_000_000;
+  else if(etMin>=570&&etMin<960) prVolMin=10_000_000;
+
+  for(const ticker of tickers.slice(0,3)){
     if(isBadTicker(ticker)||isEtf(ticker)) continue;
     const prId=`${isDrop?'drop':'spike'}_${id}_${ticker}`;
     if(state.sentPR.has(prId)) continue;
     state.sentPR.add(prId);
 
-    const snap  = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-    const td    = snap&&snap.ticker;
-    const vol   = (td&&td.day&&td.day.v)||0;
-    const price = (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+    const snap =await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+    const td   =snap&&snap.ticker;
+    const vol  =(td&&td.day&&td.day.v)||0;
+    const price=(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
     if(!td||vol<prVolMin||price<0.10||price>10) continue;
 
-    const [det,fv] = await Promise.all([getTickerDetails(ticker),getFinvizStats(ticker)]);
-    const mc    = det.market_cap||0;
-    const mcStr = mc>0?` | MC: ${fmtN(mc)}`:'';
-    const ioStr = fv.io!=='--'?` | IO: ${fv.io}`:'';
-    const siStr = fv.si!=='--'?` | SI: ${fv.si}`:'';
-    const ageMs = Date.now()-new Date(published_utc||Date.now()).getTime();
-    const ageStr= ageMs<60000?`${Math.round(ageMs/1000)}s ago`:ageMs<3600000?`${Math.round(ageMs/60000)} min ago`:`${Math.round(ageMs/3600000)}h ago`;
-    const prTag = isDrop?'PR ↓':'PR';
-    const tLink = url?`[${ticker}](<${url}>)`:`**${ticker}**`;
-    const line1 = `\`${timeStr}\` ${isDrop?'↓':'↑'} ${tLink} \`${priceFlag(price)}\` ~ ${flag(ticker)}${mcStr}${ioStr}${siStr}`;
-    const line2 = `• ${ageStr} [${prTag}] ${title.slice(0,200)}${url?` — [Link](<${url}>)`:''}`;
+    const [det,fv]=await Promise.all([getTickerDetails(ticker),getFinvizStats(ticker)]);
+    const mc   =det.market_cap||0;
+    const mcStr=mc>0?` | MC: ${fmtN(mc)}`:'';
+    const ioStr=fv.io!=='--'?` | IO: ${fv.io}`:'';
+    const siStr=fv.si!=='--'?` | SI: ${fv.si}`:'';
+    const ageMs=Date.now()-new Date(published_utc||Date.now()).getTime();
+    const ageStr=ageMs<60000?`${Math.round(ageMs/1000)}s ago`:ageMs<3600000?`${Math.round(ageMs/60000)} min ago`:`${Math.round(ageMs/3600000)}h ago`;
+    const prTag=isDrop?'PR ↓':'PR';
+    const tLink=url?`[${ticker}](<${url}>)`:`**${ticker}**`;
+    const line1=`\`${timeStr}\` ${isDrop?'↓':'↑'} ${tLink} \`${priceFlag(price)}\` ~ ${flag(ticker)}${mcStr}${ioStr}${siStr}`;
+    const line2=`• ${ageStr} [${prTag}] ${title.slice(0,200)}${url?` — [Link](<${url}>)`:''}`;
     await post({content:`${line1}\n${line2}`});
     console.log(`[${timeStr}] ${isDrop?'PR-DROP':'PR-SPIKE'}: ${ticker}`);
   }
@@ -469,21 +477,20 @@ let wsBZ=null;
 function connectBZ(){
   if(wsBZ){try{wsBZ.terminate();}catch(e){}}
   wsBZ=new WebSocket(`wss://api.benzinga.com/api/v1/news/stream?token=${BZ_KEY}`);
-  wsBZ.on('open',()=>{ console.log('[BZ] Connected'); wsBZ._ping=setInterval(()=>{if(wsBZ.readyState===WebSocket.OPEN)wsBZ.send(JSON.stringify({action:'ping'}));},30000); });
+  wsBZ.on('open',()=>{console.log('[BZ] Connected');wsBZ._ping=setInterval(()=>{if(wsBZ.readyState===WebSocket.OPEN)wsBZ.send(JSON.stringify({action:'ping'}));},30000);});
   wsBZ.on('message',data=>{try{const msg=JSON.parse(data.toString());if(msg.kind==='news'&&msg.data&&msg.data.content){const n=msg.data.content;const tickers=(n.stocks||[]).map(s=>s.name||'').filter(Boolean).map(t=>t.toUpperCase());if(tickers.length)handleNewsItem(n.title||'',tickers,n.url||'',n.created||'').catch(()=>{});}}catch(e){}});
   wsBZ.on('error',err=>console.error('[BZ] Error:',err.message));
   wsBZ.on('close',()=>{if(wsBZ._ping)clearInterval(wsBZ._ping);setTimeout(connectBZ,10000);});
 }
 
-// Polygon news fallback poll
 let lastNewsPoll=0;
 async function pollNews(){
   if(!isActive()) return;
   if(Date.now()-lastNewsPoll<5000) return;
   lastNewsPoll=Date.now();
   try{
-    const r    = await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
-    const items= (r&&r.results)||[];
+    const r=await polyGet('/v2/reference/news?limit=50&order=desc&sort=published_utc');
+    const items=(r&&r.results)||[];
     const cutoff=Date.now()-3*60*1000;
     for(const n of items){
       if(!n.published_utc||new Date(n.published_utc).getTime()<cutoff) continue;
@@ -545,7 +552,7 @@ function connectPriceWS(){
   if(ws){try{ws.terminate();}catch(e){}}
   console.log('[PriceWS] Connecting...');
   ws=new WebSocket('wss://socket.polygon.io/stocks');
-  ws.on('open',()=>{ console.log('[PriceWS] Open — sending auth'); ws.send(JSON.stringify({action:'auth',params:POLY_KEY})); });
+  ws.on('open',()=>{console.log('[PriceWS] Open — sending auth');ws.send(JSON.stringify({action:'auth',params:POLY_KEY}));});
   ws.on('message',data=>{
     try{
       for(const msg of JSON.parse(data.toString())){
@@ -555,7 +562,7 @@ function connectPriceWS(){
             subscribedTickers.clear();
             const allKeys=new Set([...topGappers.map(g=>g.ticker),...dayWatchlist.keys()]);
             const subs=[...allKeys].map(t=>`T.${t},A.${t}`).join(',');
-            if(subs){ ws.send(JSON.stringify({action:'subscribe',params:subs})); allKeys.forEach(t=>subscribedTickers.add(t)); }
+            if(subs){ws.send(JSON.stringify({action:'subscribe',params:subs}));allKeys.forEach(t=>subscribedTickers.add(t));}
             console.log(`[PriceWS] Subscribed ${allKeys.size} tickers (${topGappers.length} live + ${dayWatchlist.size} watch)`);
           }
           if(msg.status==='auth_failed') console.error('[PriceWS] AUTH FAILED — check POLY_KEY');
@@ -568,7 +575,6 @@ function connectPriceWS(){
           const liveG =topGappers.find(x=>x.ticker===ticker);
           const watchG=dayWatchlist.get(ticker);
           if(!liveG&&!watchG) continue;
-
           if(liveG&&(liveG.price>10||liveG.chgPct<5)) continue;
 
           const s=state.tickers.get(ticker);
@@ -588,10 +594,10 @@ function connectPriceWS(){
           }
         }
       }
-    }catch(e){ console.error('[PriceWS] parse error:',e.message); }
+    }catch(e){console.error('[PriceWS] parse error:',e.message);}
   });
   ws.on('error',err=>console.error('[PriceWS] error:',err.message));
-  ws.on('close',code=>{ console.log(`[PriceWS] closed (${code}), reconnecting...`); setTimeout(connectPriceWS,5000); });
+  ws.on('close',code=>{console.log(`[PriceWS] closed (${code}), reconnecting...`);setTimeout(connectPriceWS,5000);});
 }
 
 function subscribeNewTickers(tickers){
@@ -648,7 +654,7 @@ async function handleCmd(cmd,option,interaction){
           const isWatch=!topGappers.find(x=>x.ticker===g.ticker);
           return`${isWatch?'👁':'🔥'} **${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | Vol: ${fmtN(g.volume)}${g.lockedAt?` [${g.lockedAt}]`:''}`;
         }).join('\n');
-        reply={embeds:[{title:`🔥 Live: ${topGappers.length} | 👁 Watchlist: ${dayWatchlist.size}`,description:rows.slice(0,3900),color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
+        reply={embeds:[{title:`🔥 Live: ${topGappers.length} | 👁 Watch: ${dayWatchlist.size}`,description:rows.slice(0,3900),color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};
       }
     }
     else if(cmd==='news'){const ticker=option.toUpperCase();const r=await polyGet(`/v2/reference/news?ticker=${ticker}&limit=10&order=desc&sort=published_utc`);const cutoff=Date.now()-30*24*60*60*1000;const items=((r&&r.results)||[]).filter(n=>n.published_utc&&new Date(n.published_utc).getTime()>cutoff).slice(0,8);if(!items.length)reply={content:`No recent news for **${ticker}**.`};else{const rows=items.map(n=>{const age=Date.now()-new Date(n.published_utc).getTime();const a=age<3600000?`${Math.round(age/60000)}m`:age<86400000?`${Math.round(age/3600000)}h`:`${Math.round(age/86400000)}d`;return`• [${(n.title||'').slice(0,90)}](<${n.article_url||''}>) — *${a} ago*`;}).join('\n');reply={embeds:[{title:`📰 ${ticker} — Latest News`,description:rows,color:0x5865f2,footer:{text:`AziziBot · ${getET().timeStr} ET`}}]};}}
@@ -696,12 +702,11 @@ async function registerCommands(){
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main(){
-  if(!POLY_KEY)      { console.error('FATAL: POLY_KEY missing'); process.exit(1); }
-  if(!DISCORD_TOKEN) { console.error('FATAL: DISCORD_TOKEN missing'); process.exit(1); }
+  if(!POLY_KEY)      {console.error('FATAL: POLY_KEY missing');process.exit(1);}
+  if(!DISCORD_TOKEN) {console.error('FATAL: DISCORD_TOKEN missing');process.exit(1);}
   console.log('🤖 AziziBot v8 starting...');
-  console.log(`[Config] POLY_KEY: ${POLY_KEY.slice(0,8)}... DISCORD_TOKEN: ${DISCORD_TOKEN.slice(0,8)}...`);
-  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%/100K | LATE-PRE 7-9:30AM ≥30%/1M | MKT ≥20%/10M | AH ≥10%/100K');
-  console.log('[Watch] 4AM–4PM lock-in | PRs, filings, NHOD bounces all day');
+  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%+prevVol100K | LATE-PRE 7-9:30AM ≥30%+1M | MKT ≥20%+10M | AH ≥10%+prevVol100K');
+  console.log('[Watch] 4AM-4PM lock-in | stays active all day for bounces/PRs/filings');
 
   await refreshEtfList();
   await refreshGappers();
@@ -710,28 +715,26 @@ async function main(){
   // if(BZ_KEY) connectBZ();
   await registerCommands();
 
-  // Fast loop: every 20s
   setInterval(async()=>{
     await refreshEtfList();
     await refreshGappers();
     const newTickers=[...new Set([...topGappers.map(g=>g.ticker),...dayWatchlist.keys()])].filter(t=>!subscribedTickers.has(t));
     if(newTickers.length) subscribeNewTickers(newTickers);
     await pollNews();
-  }, 20*1000);
+  },20*1000);
 
-  // Slow loop: every 60s
   setInterval(async()=>{
     const {hh,m}=getET();
     if(hh===0&&m<1){
-      state.dailyCounts.clear(); state.tickers.clear(); state.sentFilings.clear();
+      state.dailyCounts.clear();state.tickers.clear();state.sentFilings.clear();
       dayWatchlist.clear();
       console.log('[Daily] Reset');
     }
     await checkMorningSnapshot();
     await checkFilings();
-  }, 60*1000);
+  },60*1000);
 
   console.log('🤖 AziziBot v8 running.');
 }
 
-main().catch(err=>{ console.error('Fatal:', err); process.exit(1); });
+main().catch(err=>{console.error('Fatal:',err);process.exit(1);});
