@@ -11,6 +11,12 @@ const APP_ID        = '1493671812247322624';
 const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57UTSPu2KfLmYNBRVPvPQIa4cSfCQA8wVcqB5d0J8cWYaJf5hlsm1EuRkQ3lolChTNh3';
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
+// ─── Session vol floors ───────────────────────────────────────────────────────
+// refreshGappers admission:  PRE/AH = 1K,  MKT = 100K
+// fireNHOD gate:             PRE/AH = none, MKT = 1M
+// Rationale: at 7AM pre-market a +200% mover may have only 2K shares traded.
+// We admit it, subscribe to it, and let the price action decide.
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
   const p = new Intl.DateTimeFormat('en-US', {
@@ -205,8 +211,8 @@ async function getGreenBars(ticker) {
 // ─── State ────────────────────────────────────────────────────────────────────
 let topGappers = [];
 
-// dayWatchlist: any ticker that ever qualifies as a gapper is locked in for
-// the full session. No time restriction — works even if bot starts mid-day.
+// dayWatchlist: any ticker that ever qualifies is locked in for the full session.
+// No time restriction — works even if bot starts mid-day.
 const dayWatchlist = new Map();
 
 const state = {
@@ -224,7 +230,13 @@ async function refreshGappers() {
   try {
     const { etMin, timeStr } = getET();
     const isMkt  = etMin >= 570 && etMin < 960;
-    const volMin = isMkt ? 100000 : 10000;
+
+    // ── Vol floor for admission into topGappers ────────────────────────────
+    // MKT (9:30–4PM): 100K — only subscribe to stocks with real market activity
+    // PRE / AH:         1K — a +200% mover at 7AM may have only 2K shares traded;
+    //                        we admit it and let fireNHOD decide on vol
+    const volMin = isMkt ? 100000 : 1000;
+    // ─────────────────────────────────────────────────────────────────────
 
     const [g1, g2, g3] = await Promise.all([
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
@@ -234,7 +246,7 @@ async function refreshGappers() {
 
     const c1=g1?.tickers?.length||0, c2=g2?.tickers?.length||0, c3=g3?.tickers?.length||0;
     console.log(`[Poly] gainers:${c1} pct:${c2} vol:${c3}`);
-    if(c1===0&&c2===0&&c3===0) { console.error('[Poly] ALL ENDPOINTS RETURNED EMPTY — check POLY_KEY or rate limit'); return; }
+    if(c1===0&&c2===0&&c3===0) { console.error('[Poly] ALL ENDPOINTS EMPTY — check POLY_KEY or rate limit'); return; }
 
     const build = t => {
       const price = (t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
@@ -243,7 +255,7 @@ async function refreshGappers() {
       const vol   = (t.day&&t.day.v)||0;
       const pv2   = (t.prevDay&&t.prevDay.v)||0;
       const mins  = Math.max(etMin-240,1);
-      const rvol  = pv2>0?(vol*390)/(mins*pv2):vol>10000?5:0;
+      const rvol  = pv2>0?(vol*390)/(mins*pv2):vol>1000?5:0;
       const exch  = t.primaryExchange||'';
       const isOTC = /OTC|GREY|PINK|EXPERT/i.test(exch);
       return { ticker:t.ticker, price, prev, chgPct, volume:vol, prevVol:pv2, rvol,
@@ -258,21 +270,21 @@ async function refreshGappers() {
     // ── Filter with per-rejection logging ────────────────────────────────
     const rejected = { pct:0, price_low:0, price_high:0, vol:0, otc:0, etf:0, bad:0 };
     const newGappers = [...merge.values()].filter(t => {
-      if(t.chgPct < 5)        { rejected.pct++;        return false; }
-      if(t.price  < 0.10)     { rejected.price_low++;  return false; }
-      if(t.price  > 10)       { rejected.price_high++; return false; }
-      if(t.volume < volMin)   { rejected.vol++;         return false; }
-      if(t.isOTC)             { rejected.otc++;         return false; }
-      if(isEtf(t.ticker))     { rejected.etf++;         return false; }
-      if(isBadTicker(t.ticker)){ rejected.bad++;        return false; }
+      if(t.chgPct < 5)         { rejected.pct++;        return false; }
+      if(t.price  < 0.10)      { rejected.price_low++;  return false; }
+      if(t.price  > 10)        { rejected.price_high++; return false; }
+      if(t.volume < volMin)    { rejected.vol++;         return false; }
+      if(t.isOTC)              { rejected.otc++;         return false; }
+      if(isEtf(t.ticker))      { rejected.etf++;         return false; }
+      if(isBadTicker(t.ticker)){ rejected.bad++;         return false; }
       return true;
     }).sort((a,b)=>b.chgPct-a.chgPct).slice(0,30);
 
-    console.log(`[Filter] from ${merge.size} merged: passed=${newGappers.length} | killed → pct<5%:${rejected.pct} price<0.10:${rejected.price_low} price>10:${rejected.price_high} vol<${fmtN(volMin)}:${rejected.vol} OTC:${rejected.otc} ETF:${rejected.etf} bad:${rejected.bad}`);
+    console.log(`[Filter] from ${merge.size}: passed=${newGappers.length} | killed → pct<5%:${rejected.pct} price<0.10:${rejected.price_low} price>10:${rejected.price_high} vol<${fmtN(volMin)}:${rejected.vol} OTC:${rejected.otc} ETF:${rejected.etf} bad:${rejected.bad}`);
     if(newGappers.length > 0)
-      console.log(`[Gappers] top5: ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,${fmtN(g.volume)},${g.exch||'?'})`).join(' ')}`);
+      console.log(`[Gappers] ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,${fmtN(g.volume)},${g.exch})`).join(' ')}`);
     else
-      console.warn(`[Gappers] ZERO GAPPERS — if this keeps happening, filters are too tight or API data is stale`);
+      console.warn('[Gappers] ZERO — volMin now 1K pre-market, if still zero the % or price filter is the culprit');
     // ─────────────────────────────────────────────────────────────────────
 
     topGappers = newGappers;
@@ -285,77 +297,74 @@ async function refreshGappers() {
       }
     }
 
-    // Update state.tickers for live gappers
+    // Sync state.tickers for live gappers
     for(const g of topGappers) {
       const ex = state.tickers.get(g.ticker)||{high:0,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]};
       state.tickers.set(g.ticker, {...ex,...g, high:Math.max(g.high,ex.high)});
     }
-    // Ensure watchlist tickers always have a state entry
+    // Ensure watchlist tickers have a state entry after dropping off live scan
     for(const [ticker,g] of dayWatchlist) {
       if(!state.tickers.has(ticker))
         state.tickers.set(ticker, {high:g.high,nhod:0,lastAlertPrice:0,lastAlertTime:0,priceHistory:[]});
     }
 
-    console.log(`[${timeStr}] ${topGappers.length} gappers | ${dayWatchlist.size} watchlist | sess:${getET().sess}`);
+    console.log(`[${timeStr}] ${topGappers.length} gappers | ${dayWatchlist.size} watchlist | sess:${getET().sess} | volFloor:${fmtN(volMin)}`);
   } catch(e) { console.error('[refreshGappers] CRASH:', e.message, e.stack); }
 }
 
 // ─── NHOD Alert ───────────────────────────────────────────────────────────────
 async function fireNHOD(ticker, price) {
-  if(!isActive()) { console.log(`[NHOD] ${ticker} skip: market not active`); return; }
+  if(!isActive()) { console.log(`[NHOD] ${ticker} skip: not active`); return; }
 
   const liveGapper  = topGappers.find(g=>g.ticker===ticker);
   const watchGapper = dayWatchlist.get(ticker);
   const gapper      = liveGapper || watchGapper;
   const isWatchOnly = !liveGapper && !!watchGapper;
 
-  if(!gapper) { console.log(`[NHOD] ${ticker} skip: not in gappers or watchlist`); return; }
+  if(!gapper) { console.log(`[NHOD] ${ticker} skip: not tracked`); return; }
 
   const s = state.tickers.get(ticker);
-  if(!s)                      { console.log(`[NHOD] ${ticker} skip: no state entry`); return; }
-  if(price <= s.high+0.001)   { console.log(`[NHOD] ${ticker} skip: price $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`); return; }
+  if(!s)                    { console.log(`[NHOD] ${ticker} skip: no state`); return; }
+  if(price <= s.high+0.001) { console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`); return; }
 
   const { etMin, timeStr } = getET();
 
-  // ── Price range gate ──────────────────────────────────────────────────
-  if(price > 10)   { console.log(`[NHOD] ${ticker} skip: price $${price.toFixed(4)} > $10`); return; }
-  if(price < 0.10) { console.log(`[NHOD] ${ticker} skip: price $${price.toFixed(4)} < $0.10`); return; }
+  // ── Price range ───────────────────────────────────────────────────────
+  if(price > 10)   { console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} > $10`); return; }
+  if(price < 0.10) { console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} < $0.10`); return; }
 
   // ── Session gates (skipped for watchlist-only tickers) ────────────────
   if(!isWatchOnly) {
-    if(etMin >= 240 && etMin < 570) {
-      // Pre-market: 10% gain, 10K vol
-      if(gapper.chgPct < 10)   { console.log(`[NHOD] ${ticker} skip: PRE chgPct ${gapper.chgPct.toFixed(1)}% < 10%`); return; }
-      if(gapper.volume < 10000){ console.log(`[NHOD] ${ticker} skip: PRE vol ${fmtN(gapper.volume)} < 10K`); return; }
-    } else if(etMin >= 570 && etMin < 960) {
-      // Market hours: 15% gain, 1M vol
-      if(gapper.chgPct < 15)       { console.log(`[NHOD] ${ticker} skip: MKT chgPct ${gapper.chgPct.toFixed(1)}% < 15%`); return; }
-      if(gapper.volume < 1000000)  { console.log(`[NHOD] ${ticker} skip: MKT vol ${fmtN(gapper.volume)} < 1M`); return; }
+    const isMkt = etMin >= 570 && etMin < 960;
+    if(isMkt) {
+      // Market hours: require meaningful volume and gain
+      if(gapper.chgPct < 15)      { console.log(`[NHOD] ${ticker} skip: MKT chg ${gapper.chgPct.toFixed(1)}% < 15%`); return; }
+      if(gapper.volume < 1000000) { console.log(`[NHOD] ${ticker} skip: MKT vol ${fmtN(gapper.volume)} < 1M`); return; }
     } else {
-      // After-hours: 10% gain, 10K vol
-      if(gapper.chgPct < 10)   { console.log(`[NHOD] ${ticker} skip: AH chgPct ${gapper.chgPct.toFixed(1)}% < 10%`); return; }
-      if(gapper.volume < 10000){ console.log(`[NHOD] ${ticker} skip: AH vol ${fmtN(gapper.volume)} < 10K`); return; }
+      // Pre-market / after-hours: gain gate only, no vol gate
+      // (volume is tiny early pre-market — let price action speak)
+      if(gapper.chgPct < 10) { console.log(`[NHOD] ${ticker} skip: PRE/AH chg ${gapper.chgPct.toFixed(1)}% < 10%`); return; }
     }
   } else {
-    console.log(`[NHOD] ${ticker} watchlist-only → skipping session gates`);
+    console.log(`[NHOD] ${ticker} watchlist-only — session gates skipped`);
   }
 
   // ── Cooldown / repeat gates ───────────────────────────────────────────
   if(s.lastAlertPrice>0 && price < s.lastAlertPrice*1.075) {
-    console.log(`[NHOD] ${ticker} skip: price $${price.toFixed(4)} < 7.5% above last alert $${s.lastAlertPrice.toFixed(4)}`); return;
+    console.log(`[NHOD] ${ticker} skip: need 7.5% above last alert $${s.lastAlertPrice.toFixed(4)}`); return;
   }
   if(s.lastAlertTime>0 && Date.now()-s.lastAlertTime < 5*60*1000) {
     console.log(`[NHOD] ${ticker} skip: 5-min cooldown (${Math.round((Date.now()-s.lastAlertTime)/1000)}s elapsed)`); return;
   }
   if((state.dailyCounts.get(ticker)||0) >= 3) {
-    console.log(`[NHOD] ${ticker} skip: max 3/day reached`); return;
+    console.log(`[NHOD] ${ticker} skip: max 3/day`); return;
   }
   // ─────────────────────────────────────────────────────────────────────
 
   const nhod = (s.nhod||0)+1;
   state.tickers.set(ticker, {...s, high:price, nhod, lastAlertPrice:price, lastAlertTime:Date.now(), priceHistory:s.priceHistory||[]});
   state.dailyCounts.set(ticker, (state.dailyCounts.get(ticker)||0)+1);
-  console.log(`[ALERT] NHOD ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
+  console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
 
   const [newsUrl, rs, det, fv, greenBars] = await Promise.all([
     getNewsUrl(ticker), getRecentSplit(ticker), getTickerDetails(ticker),
@@ -392,7 +401,7 @@ async function fireNHOD(ticker, price) {
   const extraStr = extraLine?`\n> ${extraLine}`:'';
   const line = `\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
   await post({content:line});
-  console.log(`[ALERT] posted to Discord`);
+  console.log(`[ALERT] posted OK`);
 }
 
 // ─── News alerts ─────────────────────────────────────────────────────────────
@@ -410,7 +419,8 @@ async function handleNewsItem(title, tickers, url, published_utc) {
   if(!isDrop&&!isSpike) return;
 
   const {timeStr,etMin} = getET();
-  const prVolMin = (etMin>=570&&etMin<960)?100000:10000;
+  const isMkt = etMin >= 570 && etMin < 960;
+  const prVolMin = isMkt ? 100000 : 1000; // same as refreshGappers floor
 
   for(const ticker of tickers.slice(0,3)) {
     if(isBadTicker(ticker)||isEtf(ticker)) continue;
@@ -521,13 +531,12 @@ const subscribedTickers=new Set();
 
 function connectPriceWS(){
   if(ws){try{ws.terminate();}catch(e){}}
-  console.log('[PriceWS] Connecting to Polygon...');
+  console.log('[PriceWS] Connecting...');
   ws=new WebSocket('wss://socket.polygon.io/stocks');
   ws.on('open',()=>{ console.log('[PriceWS] Open — sending auth'); ws.send(JSON.stringify({action:'auth',params:POLY_KEY})); });
   ws.on('message',data=>{
     try{
       for(const msg of JSON.parse(data.toString())){
-        // Log ALL status messages so we can see auth_failed, etc.
         if(msg.ev==='status'){
           console.log(`[PriceWS] status: ${msg.status} — ${msg.message||''}`);
           if(msg.status==='auth_success'){
@@ -537,9 +546,7 @@ function connectPriceWS(){
             if(subs){ ws.send(JSON.stringify({action:'subscribe',params:subs})); allKeys.forEach(t=>subscribedTickers.add(t)); }
             console.log(`[PriceWS] Subscribed to ${allKeys.size} tickers (${topGappers.length} live + ${dayWatchlist.size} watch)`);
           }
-          if(msg.status==='auth_failed'){
-            console.error('[PriceWS] AUTH FAILED — check POLY_KEY');
-          }
+          if(msg.status==='auth_failed') console.error('[PriceWS] AUTH FAILED — check POLY_KEY');
         }
 
         if(msg.ev==='T'||msg.ev==='A'){
@@ -551,11 +558,10 @@ function connectPriceWS(){
           const watchG=dayWatchlist.get(ticker);
           if(!liveG&&!watchG) continue;
 
-          // Pre-filter live gappers; watchlist tickers always pass
-          if(liveG&&(liveG.volume<10000||liveG.price>10||liveG.chgPct<5)) continue;
+          if(liveG&&(liveG.volume<1000||liveG.price>10||liveG.chgPct<5)) continue;
 
           const s=state.tickers.get(ticker);
-          if(!s){ console.log(`[PriceWS] ${ticker} tick $${price} — NO STATE ENTRY, skipping`); continue; }
+          if(!s) continue;
 
           if(!s.priceHistory) s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
@@ -566,7 +572,7 @@ function connectPriceWS(){
             if(Date.now()-last>10000){
               console.log(`[PriceWS] ${ticker} NEW HIGH $${price.toFixed(4)} (was $${s.high.toFixed(4)}) → fireNHOD`);
               wsDebounce.set(ticker,Date.now());
-              fireNHOD(ticker,price).catch(e=>console.error(`[fireNHOD] ${ticker} error:`,e.message));
+              fireNHOD(ticker,price).catch(e=>console.error(`[fireNHOD] ${ticker}:`,e.message));
             }
           }
         }
@@ -581,7 +587,7 @@ function subscribeNewTickers(tickers){
   if(!ws||ws.readyState!==WebSocket.OPEN||!tickers.length) return;
   ws.send(JSON.stringify({action:'subscribe',params:tickers.map(t=>`T.${t},A.${t}`).join(',')}));
   tickers.forEach(t=>subscribedTickers.add(t));
-  console.log(`[PriceWS] +subscribed ${tickers.length}: ${tickers.join(', ')}`);
+  console.log(`[PriceWS] +subscribed: ${tickers.join(', ')}`);
 }
 
 // ─── Discord slash commands ───────────────────────────────────────────────────
