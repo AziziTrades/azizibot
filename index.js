@@ -13,13 +13,12 @@ const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57U
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
 // ─── Session rules ────────────────────────────────────────────────────────────
-// 4:00–7:00 AM ET  → 10% gain, 100K vol
-// 7:00 AM–4:00 PM  → 15% gain, 1M vol
-// 4:00–8:00 PM ET  → 10% gain, 100K vol
+// Pre-market  4:00–9:30 AM ET → 10% gain, 10K vol
+// Market      9:30 AM–4:00 PM → 15% gain, 1M vol
+// After-hours 4:00–8:00 PM ET → 10% gain, 10K vol
 //
-// dayWatchlist: any ticker that ever qualifies as a gapper during the session
-// gets locked in for the rest of the day. No time-window restriction.
-// Pre-qualified = only price-range + new-high + cooldown + daily-max gates apply.
+// dayWatchlist: any ticker that ever qualifies as a gapper is locked in for
+// the rest of the day regardless of what time the bot started.
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
@@ -217,10 +216,9 @@ async function getGreenBars(ticker) {
 // ─── State ────────────────────────────────────────────────────────────────────
 let topGappers = [];
 
-// dayWatchlist — every ticker that ever qualifies as a gapper during today's
-// session gets locked in here the first time it appears. No time window.
-// This survives bot restarts mid-day: tickers that were hot at 6AM but fell
-// off the live scan by 11AM stay subscribed and watched for new highs.
+// dayWatchlist — every ticker that ever qualifies as a gapper during the
+// session is locked in for the rest of the day. No time-window restriction,
+// so works correctly even if the bot starts or restarts mid-day.
 // Shape: ticker → { ticker, chgPct, volume, rvol, price, high }
 const dayWatchlist = new Map();
 
@@ -238,10 +236,17 @@ const wsDebounce = new Map();
 async function refreshGappers() {
   try {
     const { etMin } = getET();
+
+    // Pre-market / after-hours use a lower volume floor (10K).
+    // Regular market hours require 1M for the MKT session gate in fireNHOD,
+    // but we admit them here at 10K so they're at least tracked.
+    const isMkt   = etMin >= 570 && etMin < 960;
+    const volMin  = isMkt ? 100000 : 10000;
+
     const [g1, g2, g3] = await Promise.all([
       polyGet('/v2/snapshot/locale/us/markets/stocks/gainers'),
-      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=100'),
-      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=volume&direction=desc&limit=100'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=changePercent&direction=desc&limit=250'),
+      polyGet('/v2/snapshot/locale/us/markets/stocks/tickers?sort=volume&direction=desc&limit=250'),
     ]);
     console.log(`[Poly] gainers:${g1?.tickers?.length||0} pct:${g2?.tickers?.length||0} vol:${g3?.tickers?.length||0}`);
 
@@ -252,11 +257,11 @@ async function refreshGappers() {
       const vol   = (t.day&&t.day.v) || 0;
       const pv2   = (t.prevDay&&t.prevDay.v) || 0;
       const mins  = Math.max(etMin-240, 1);
-      const rvol  = pv2>0 ? (vol*390)/(mins*pv2) : vol>100000 ? 5 : 0;
+      const rvol  = pv2>0 ? (vol*390)/(mins*pv2) : vol>10000 ? 5 : 0;
       const exch  = t.primaryExchange||'';
       const isOTC = /OTC|GREY|PINK|EXPERT/i.test(exch);
       return { ticker:t.ticker, price, prev, chgPct, volume:vol, prevVol:pv2, rvol,
-               high:(t.day&&t.day.h)||price, isOTC };
+               high:(t.day&&t.day.h)||price, isOTC, exch };
     };
 
     const merge = new Map();
@@ -264,11 +269,18 @@ async function refreshGappers() {
       for(const t of ((src&&src.tickers)||[]))
         if(t.ticker && !merge.has(t.ticker)) merge.set(t.ticker, build(t));
 
+    // ── Debug: log known names to diagnose filter kills ───────────────────
+    ['MYSE','WSHP','CAPS','CTNT','WNW','MAMO','AEHR'].forEach(t => {
+      const d = merge.get(t);
+      if(d) console.log(`[DBG] ${t} price:${d.price} chg:${d.chgPct.toFixed(1)}% vol:${fmtN(d.volume)} otc:${d.isOTC} exch:${d.exch}`);
+    });
+    // ─────────────────────────────────────────────────────────────────────
+
     const newGappers = [...merge.values()].filter(t =>
       t.chgPct >= 5 &&
       t.price  >= 0.10 &&
       t.price  <= 10 &&
-      t.volume >= 100000 &&
+      t.volume >= volMin &&
       !t.isOTC &&
       !isEtf(t.ticker) &&
       !isBadTicker(t.ticker)
@@ -276,9 +288,7 @@ async function refreshGappers() {
 
     topGappers = newGappers;
 
-    // ── Lock into dayWatchlist — no time restriction ───────────────────────
-    // Any ticker that qualifies as a gapper gets permanently tracked today.
-    // Works correctly even if bot starts mid-day.
+    // ── Lock into dayWatchlist (no time restriction) ───────────────────────
     for(const g of topGappers) {
       if(!dayWatchlist.has(g.ticker)) {
         dayWatchlist.set(g.ticker, {
@@ -300,15 +310,14 @@ async function refreshGappers() {
       state.tickers.set(g.ticker, {...ex,...g, high:Math.max(g.high, ex.high)});
     }
 
-    // Ensure watchlist tickers always have a state entry even after dropping
-    // out of the live scan (preserves their tracked high-of-day)
+    // Ensure watchlist tickers always have a state entry after dropping off live scan
     for(const [ticker, g] of dayWatchlist) {
       if(!state.tickers.has(ticker)) {
         state.tickers.set(ticker, {high:g.high, nhod:0, lastAlertPrice:0, lastAlertTime:0, priceHistory:[]});
       }
     }
 
-    console.log(`[${getET().timeStr}] ${topGappers.length} gappers | ${dayWatchlist.size} day watchlist`);
+    console.log(`[${getET().timeStr}] ${topGappers.length} gappers | ${dayWatchlist.size} watchlist`);
   } catch(e) { console.error('refreshGappers:', e.message); }
 }
 
@@ -319,7 +328,7 @@ async function fireNHOD(ticker, price) {
   const liveGapper  = topGappers.find(g=>g.ticker===ticker);
   const watchGapper = dayWatchlist.get(ticker);
   const gapper      = liveGapper || watchGapper;
-  const isWatchOnly = !liveGapper && !!watchGapper; // dropped off live scan, still tracked
+  const isWatchOnly = !liveGapper && !!watchGapper;
   if(!gapper) return;
 
   const s = state.tickers.get(ticker);
@@ -332,22 +341,24 @@ async function fireNHOD(ticker, price) {
   if(price < 0.10) return;
 
   if(isWatchOnly) {
-    // Pre-qualified earlier today — skip session % / vol re-checks entirely.
-    // Price range above is the only hard filter.
+    // Pre-qualified earlier today — skip session gates entirely
   } else {
-    // Still in live scan — normal session rules apply
     if(etMin >= 240 && etMin < 420) {
-      // 4AM–7AM: 10% gain, 100K vol
-      if(gapper.chgPct < 10)     return;
-      if(gapper.volume < 100000) return;
-    } else if(etMin >= 420 && etMin < 960) {
-      // 7AM–4PM: 15% gain, 1M vol
+      // 4AM–7AM pre-market
+      if(gapper.chgPct < 10)    return;
+      if(gapper.volume < 10000) return;
+    } else if(etMin >= 420 && etMin < 570) {
+      // 7AM–9:30AM pre-market
+      if(gapper.chgPct < 10)    return;
+      if(gapper.volume < 10000) return;
+    } else if(etMin >= 570 && etMin < 960) {
+      // 9:30AM–4PM market hours
       if(gapper.chgPct < 15)      return;
       if(gapper.volume < 1000000) return;
     } else {
-      // 4PM–8PM AH: 10% gain, 100K vol
-      if(gapper.chgPct < 10)     return;
-      if(gapper.volume < 100000) return;
+      // 4PM–8PM after-hours
+      if(gapper.chgPct < 10)    return;
+      if(gapper.volume < 10000) return;
     }
   }
 
@@ -425,7 +436,10 @@ async function handleNewsItem(title, tickers, url, published_utc) {
   const isSpike = !isDrop && SPIKE_RE.test(title);
   if(!isDrop && !isSpike) return;
 
-  const { timeStr } = getET();
+  const { timeStr, etMin } = getET();
+
+  // Pre-market / after-hours: lower vol floor so early movers aren't silenced
+  const prVolMin = (etMin >= 570 && etMin < 960) ? 100000 : 10000;
 
   for(const ticker of tickers.slice(0,3)) {
     if(isBadTicker(ticker)||isEtf(ticker)) continue;
@@ -438,7 +452,7 @@ async function handleNewsItem(title, tickers, url, published_utc) {
     const td   = snap&&snap.ticker;
     const vol  = (td&&td.day&&td.day.v)||0;
     const price= (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
-    if(!td||vol<100000||price<0.10||price>10) continue;
+    if(!td||vol<prVolMin||price<0.10||price>10) continue;
 
     const [det, fv] = await Promise.all([getTickerDetails(ticker), getFinvizStats(ticker)]);
     const mc    = det.market_cap||0;
@@ -570,7 +584,6 @@ function connectPriceWS() {
       for(const msg of JSON.parse(data.toString())) {
         if(msg.ev==='status' && msg.status==='auth_success') {
           subscribedTickers.clear();
-          // Resubscribe to live gappers + full day watchlist on every reconnect
           const allKeys = new Set([...topGappers.map(g=>g.ticker), ...dayWatchlist.keys()]);
           const subs = [...allKeys].map(t=>`T.${t},A.${t}`).join(',');
           if(subs) { ws.send(JSON.stringify({action:'subscribe',params:subs})); allKeys.forEach(t=>subscribedTickers.add(t)); }
@@ -585,9 +598,8 @@ function connectPriceWS() {
           const watchG = dayWatchlist.get(ticker);
           if(!liveG && !watchG) continue;
 
-          // Pre-filter only for live gappers; watchlist tickers pass freely —
-          // full gate logic is in fireNHOD
-          if(liveG && (liveG.volume<100000||liveG.price>10||liveG.chgPct<5)) continue;
+          // Pre-filter live gappers only; watchlist tickers pass freely
+          if(liveG && (liveG.volume<10000||liveG.price>10||liveG.chgPct<5)) continue;
 
           const s = state.tickers.get(ticker);
           if(!s) continue;
@@ -786,7 +798,7 @@ async function main() {
       state.dailyCounts.clear();
       state.tickers.clear();
       state.sentFilings.clear();
-      dayWatchlist.clear(); // new day — fresh watchlist
+      dayWatchlist.clear();
       console.log('[Daily] Reset');
     }
     await checkMorningSnapshot();
