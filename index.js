@@ -11,15 +11,26 @@ const APP_ID        = '1493671812247322624';
 const TOP_GAPPERS_WH = 'https://discord.com/api/webhooks/1493250562689597623/57UTSPu2KfLmYNBRVPvPQIa4cSfCQA8wVcqB5d0J8cWYaJf5hlsm1EuRkQ3lolChTNh3';
 const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM3ow3kgoSTHV9JGcNppy_eAjcTf-l7Wdf91YOV1VPDtoMIbvrGWPoP4_-I_53ejziZ';
 
-// ─── Session rules ────────────────────────────────────────────────────────────
+// ─── Session tiers ────────────────────────────────────────────────────────────
 //
-//  EARLY-PRE  4:00–7:00 AM   ≥10% gain   NO vol floor  ← day.v is tiny at 7AM
-//  LATE-PRE   7:00–9:30 AM   ≥30% gain   day.v ≥ 1M
-//  MKT        9:30AM–4:00PM  ≥20% gain   day.v ≥ 10M
-//  AH         4:00–8:00 PM   ≥10% gain   NO vol floor
+//  EARLY-PRE  4:00–7:00 AM   ≥10% gain   vol = 0   (day.v is near-zero before open)
+//  LATE-PRE   7:00–9:30 AM   ≥20% gain   vol = 0   (still pre-market, vol is thin)
+//  MKT        9:30AM–4:00PM  ≥20% gain   vol ≥ 10M (real market hours, vol built up)
+//  AH         4:00–8:00 PM   ≥10% gain   vol = 0
 //
-//  dayWatchlist: locked 4AM–4PM, stays active all day for bounces/PRs/filings.
-//  Watchlist-only tickers skip session gates entirely.
+//  Vol is ONLY enforced during regular market hours (MKT).
+//  Pre-market % gain IS the quality filter — a stock up 20%+ pre-market is real.
+//
+//  dayWatchlist: any ticker qualifying 4AM–4PM is locked in all day.
+//  Watchlist-only tickers skip session gates — monitored for bounces/PRs/filings.
+
+function getTier(etMin) {
+  if(etMin>=240&&etMin<420)  return {name:'EARLY-PRE', minChg:10, minVol:0};
+  if(etMin>=420&&etMin<570)  return {name:'LATE-PRE',  minChg:20, minVol:0};
+  if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:20, minVol:10_000_000};
+  if(etMin>=960&&etMin<1200) return {name:'AH',        minChg:10, minVol:0};
+  return null;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getET() {
@@ -34,15 +45,6 @@ function getET() {
   const timeStr = `${String(hh).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
   const sess    = etMin>=240&&etMin<570?'PRE':etMin>=570&&etMin<960?'MKT':etMin>=960&&etMin<1200?'AH':'CLOSED';
   return {hh,m,s,etMin,timeStr,sess};
-}
-
-// Returns current session tier, or null if market is closed
-function getTier(etMin) {
-  if(etMin>=240&&etMin<420) return {name:'EARLY-PRE', minChg:10, minVol:0,          useDay:false};
-if(etMin>=420&&etMin<570) return {name:'LATE-PRE', minChg:30, minVol:500_000,   useDay:true};
-  if(etMin>=570&&etMin<960) return {name:'MKT',       minChg:20, minVol:10_000_000, useDay:true };
-  if(etMin>=960&&etMin<1200)return {name:'AH',        minChg:10, minVol:0,          useDay:false};
-  return null;
 }
 
 function isActive()  { return !!getTier(getET().etMin); }
@@ -80,7 +82,7 @@ function polyGet(path){
   const sep=path.includes('?')?'&':'?';
   return jsonGet(`https://api.polygon.io${path}${sep}apiKey=${POLY_KEY}`);
 }
-async function postToWebhook(url,payload) {
+async function postToWebhook(url,payload){
   return new Promise(resolve=>{
     const body=JSON.stringify(payload);
     const u=new URL(url);
@@ -123,8 +125,7 @@ const ETF_FALLBACK=new Set(['SPY','QQQ','IWM','DIA','GLD','SLV','TLT','HYG','VXX
   'FAS','FAZ','TNA','TZA','UPRO','SDOW','UDOW','GUSH','DRIP','ERX','ERY','BOIL','KOLD',
   'ARKK','ARKG','ARKW','ARKF','GDX','GDXJ','XLF','XLE','XLK','XLV','XLI','XLP','XLU',
   'VTI','VOO','IVV','IJR','IJH']);
-let etfSet=new Set(ETF_FALLBACK);
-let lastEtfRefresh=0;
+let etfSet=new Set(ETF_FALLBACK), lastEtfRefresh=0;
 async function refreshEtfList(){
   if(Date.now()-lastEtfRefresh<6*60*60*1000) return;
   try{
@@ -169,7 +170,10 @@ async function getNewsUrl(ticker){
 async function getRecentSplit(ticker){
   try{
     const r=await polyGet(`/v3/reference/splits?ticker=${ticker}&limit=5&order=desc`);
-    const s=(r&&r.results||[]).find(s=>{const d=(Date.now()-new Date(s.execution_date).getTime())/86400000;return d<=90&&s.split_from>s.split_to;});
+    const s=(r&&r.results||[]).find(s=>{
+      const d=(Date.now()-new Date(s.execution_date).getTime())/86400000;
+      return d<=90&&s.split_from>s.split_to;
+    });
     if(s){const d=new Date(s.execution_date);return`${s.split_to} for ${s.split_from} R/S ${d.toLocaleString('en-US',{month:'short'})}. ${d.getDate()}`;}
   }catch(e){}
   return null;
@@ -191,7 +195,11 @@ async function getFinvizStats(ticker){
     }
   }catch(e){}
   if(r.float==='--'){
-    try{const det=await getTickerDetails(ticker);const sh=det.share_class_shares_outstanding||det.weighted_shares_outstanding||0;if(sh>0)r.float=fmtN(sh)+' (out)';}catch(e){}
+    try{
+      const det=await getTickerDetails(ticker);
+      const sh=det.share_class_shares_outstanding||det.weighted_shares_outstanding||0;
+      if(sh>0) r.float=fmtN(sh)+' (out)';
+    }catch(e){}
   }
   return r;
 }
@@ -225,19 +233,25 @@ async function refreshGappers(){
     ]);
     const c1=g1?.tickers?.length||0,c2=g2?.tickers?.length||0,c3=g3?.tickers?.length||0;
     console.log(`[Poly] gainers:${c1} pct:${c2} vol:${c3}`);
-    if(c1===0&&c2===0&&c3===0){console.error('[Poly] ALL EMPTY — check POLY_KEY or rate limit');return;}
+    if(c1===0&&c2===0&&c3===0){console.error('[Poly] ALL EMPTY — check POLY_KEY');return;}
 
     const build=t=>{
-      const price =(t.lastTrade&&t.lastTrade.p)||(t.day&&t.day.c)||0;
-      const prev  =(t.prevDay&&t.prevDay.c)||0;
-      const chgPct=price&&prev?((price-prev)/prev)*100:(t.todaysChangePerc||0);
-      const vol   =(t.day&&t.day.v)||0;
-      const pv2   =(t.prevDay&&t.prevDay.v)||0;
-      const mins  =Math.max(etMin-240,1);
-      const rvol  =pv2>0?(vol*390)/(mins*pv2):0;
-      const isOTC =/OTC|GREY|PINK|EXPERT/i.test(t.primaryExchange||'');
+      // Use lastTrade.p (real-time last trade, includes pre-market) for price.
+      // Fall back to day.c only if lastTrade is missing.
+      const lastP  = (t.lastTrade&&t.lastTrade.p)||0;
+      const dayC   = (t.day&&t.day.c)||0;
+      const price  = lastP||dayC||0;
+      const prev   = (t.prevDay&&t.prevDay.c)||0;
+      // Calculate % change from prev close. Fall back to Polygon's own field.
+      const chgPct = (price>0&&prev>0) ? ((price-prev)/prev)*100 : (t.todaysChangePerc||0);
+      const vol    = (t.day&&t.day.v)||0;
+      const pv2    = (t.prevDay&&t.prevDay.v)||0;
+      const mins   = Math.max(etMin-240,1);
+      const rvol   = pv2>0?(vol*390)/(mins*pv2):0;
+      const isOTC  = /OTC|GREY|PINK|EXPERT/i.test(t.primaryExchange||'');
       return {ticker:t.ticker,price,prev,chgPct,volume:vol,prevVol:pv2,rvol,
-              high:(t.day&&t.day.h)||price,isOTC};
+              high:(t.day&&t.day.h)||price,isOTC,
+              _lastP:lastP,_dayC:dayC}; // keep raw fields for debug
     };
 
     const merge=new Map();
@@ -245,40 +259,41 @@ async function refreshGappers(){
       for(const t of ((src&&src.tickers)||[]))
         if(t.ticker&&!merge.has(t.ticker)) merge.set(t.ticker,build(t));
 
-    // ── Filter using current tier ─────────────────────────────────────────
-    const {name,minChg,minVol,useDay}=tier;
-    const rejected={pct:0,price_low:0,price_high:0,vol:0,otc:0,etf:0,bad:0};
+    // ── Debug: log top 10 by chgPct from raw merge (before any filter) ────
+    const top10=[...merge.values()]
+      .filter(t=>t.chgPct>0)
+      .sort((a,b)=>b.chgPct-a.chgPct)
+      .slice(0,10);
+    if(top10.length>0)
+      console.log(`[RAW-TOP10] ${top10.map(t=>`${t.ticker}:${t.chgPct.toFixed(0)}%,lastP:${t._lastP},dayC:${t._dayC},prev:${t.prev},vol:${fmtN(t.volume)},otc:${t.isOTC}`).join(' | ')}`);
+    // ──────────────────────────────────────────────────────────────────────
+
+    const {name,minChg,minVol}=tier;
+    const rej={pct:0,pl:0,ph:0,vol:0,otc:0,etf:0,bad:0};
     const newGappers=[...merge.values()].filter(t=>{
-      if(t.chgPct  < minChg)    {rejected.pct++;       return false;}
-      if(t.price   < 0.10)      {rejected.price_low++; return false;}
-      if(t.price   > 10)        {rejected.price_high++;return false;}
-      if(minVol>0){
-        const v=useDay?t.volume:t.prevVol;
-        if(v<minVol){rejected.vol++;return false;}
-      }
-      if(t.isOTC)               {rejected.otc++;        return false;}
-      if(isEtf(t.ticker))       {rejected.etf++;        return false;}
-      if(isBadTicker(t.ticker)) {rejected.bad++;        return false;}
+      if(t.chgPct <minChg)    {rej.pct++; return false;}
+      if(t.price  <0.10)      {rej.pl++;  return false;}
+      if(t.price  >10)        {rej.ph++;  return false;}
+      if(minVol>0&&t.volume<minVol){rej.vol++;return false;}
+      if(t.isOTC)             {rej.otc++; return false;}
+      if(isEtf(t.ticker))     {rej.etf++; return false;}
+      if(isBadTicker(t.ticker)){rej.bad++;return false;}
       return true;
     }).sort((a,b)=>b.chgPct-a.chgPct).slice(0,50);
 
-    const volDesc=minVol===0?'none':`${useDay?'dayVol':'prevVol'}≥${fmtN(minVol)}`;
-    console.log(`[${name}] from ${merge.size}: passed=${newGappers.length} | chg<${minChg}%:${rejected.pct} p<0.10:${rejected.price_low} p>10:${rejected.price_high} vol(${volDesc}):${rejected.vol} OTC:${rejected.otc} ETF:${rejected.etf}`);
+    console.log(`[${name}] from ${merge.size}: passed=${newGappers.length} | chg<${minChg}%:${rej.pct} p<0.10:${rej.pl} p>10:${rej.ph} vol:${rej.vol} OTC:${rej.otc} ETF:${rej.etf}`);
     if(newGappers.length>0)
-      console.log(`[Gappers] ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,dV:${fmtN(g.volume)})`).join(' ')}`);
-    else
-      console.warn(`[${name}] Zero gappers. Tier: minChg=${minChg}% minVol=${volDesc}`);
-    // ─────────────────────────────────────────────────────────────────────
+      console.log(`[Gappers] ${newGappers.slice(0,5).map(g=>`${g.ticker}(${g.chgPct.toFixed(0)}%,${fmtN(g.volume)})`).join(' ')}`);
 
     topGappers=newGappers;
 
-    // Lock into dayWatchlist during 4AM–4PM
+    // Lock into dayWatchlist 4AM–4PM
     if(etMin>=240&&etMin<960){
       for(const g of topGappers){
         if(!dayWatchlist.has(g.ticker)){
           dayWatchlist.set(g.ticker,{ticker:g.ticker,chgPct:g.chgPct,volume:g.volume,
             rvol:g.rvol,price:g.price,high:g.high,lockedAt:name});
-          console.log(`[Watch] +${g.ticker} +${g.chgPct.toFixed(1)}% dVol:${fmtN(g.volume)} [${name}]`);
+          console.log(`[Watch] +${g.ticker} +${g.chgPct.toFixed(1)}% vol:${fmtN(g.volume)} [${name}]`);
         }
       }
     }
@@ -320,11 +335,8 @@ async function fireNHOD(ticker,price){
     if(gapper.chgPct<tier.minChg){
       console.log(`[NHOD] ${ticker} skip: ${tier.name} chg ${gapper.chgPct.toFixed(1)}%<${tier.minChg}%`);return;
     }
-    if(tier.minVol>0){
-      const v=tier.useDay?gapper.volume:gapper.prevVol;
-      if(v<tier.minVol){
-        console.log(`[NHOD] ${ticker} skip: ${tier.name} vol ${fmtN(v)}<${fmtN(tier.minVol)}`);return;
-      }
+    if(tier.minVol>0&&gapper.volume<tier.minVol){
+      console.log(`[NHOD] ${ticker} skip: ${tier.name} vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
     }
   }
 
@@ -392,7 +404,7 @@ async function handleNewsItem(title,tickers,url,published_utc){
 
   const {timeStr,etMin}=getET();
   const tier=getTier(etMin);
-  const prVolMin=tier&&tier.useDay?tier.minVol:0;
+  const prVolMin=tier?.minVol||0;
 
   for(const ticker of tickers.slice(0,3)){
     if(isBadTicker(ticker)||isEtf(ticker)) continue;
@@ -421,7 +433,7 @@ async function handleNewsItem(title,tickers,url,published_utc){
   if(state.sentPR.size>500){const a=[...state.sentPR];state.sentPR.clear();a.slice(-200).forEach(x=>state.sentPR.add(x));}
 }
 
-// ─── Benzinga WS (disabled — using Polygon poll) ──────────────────────────────
+// ─── Benzinga WS (disabled) ───────────────────────────────────────────────────
 let wsBZ=null;
 function connectBZ(){
   if(wsBZ){try{wsBZ.terminate();}catch(e){}}
@@ -487,6 +499,7 @@ async function checkMorningSnapshot(){
     return`${dot} **${g.ticker}** \`${priceFlag(g.price)}\` \`+${g.chgPct.toFixed(1)}%\` | $${g.price.toFixed(4)} | Vol: ${fmtN(g.volume)} | RVol: ${fmtRVol(g.rvol)}`;
   }).join('\n');
   await post({embeds:[{title:`${hh===6?'🌅 6AM':'☀️ 7AM'} Pre-Market Gappers`,description:rows||'No data',color:0x00d4ff,footer:{text:`AziziBot · ${getET().timeStr} ET`},timestamp:new Date().toISOString()}]});
+  console.log(`[${getET().timeStr}] Morning snapshot posted`);
 }
 
 // ─── Price WebSocket ──────────────────────────────────────────────────────────
@@ -642,8 +655,8 @@ async function main(){
   if(!POLY_KEY)      {console.error('FATAL: POLY_KEY missing');process.exit(1);}
   if(!DISCORD_TOKEN) {console.error('FATAL: DISCORD_TOKEN missing');process.exit(1);}
   console.log('🤖 AziziBot v8 starting...');
-  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%/noVol | LATE-PRE 7-9:30AM ≥30%/1M | MKT ≥20%/10M | AH ≥10%/noVol');
-  console.log('[Watch] Lock-in 4AM-4PM · PRs/filings/bounces all day');
+  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%/noVol | LATE-PRE 7-9:30AM ≥20%/noVol | MKT ≥20%/10M | AH ≥10%/noVol');
+  console.log('[Key]   Vol floor = 0 for all pre-market. % gain is the only pre-market quality gate.');
 
   await refreshEtfList();
   await refreshGappers();
