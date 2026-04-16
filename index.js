@@ -39,7 +39,7 @@ function getET() {
 // Returns current session tier, or null if market is closed
 function getTier(etMin) {
   if(etMin>=240&&etMin<420) return {name:'EARLY-PRE', minChg:10, minVol:0,          useDay:false};
-  if(etMin>=420&&etMin<570) return {name:'LATE-PRE',  minChg:30, minVol:1_000_000,  useDay:true };
+if(etMin>=420&&etMin<570) return {name:'LATE-PRE', minChg:30, minVol:500_000,   useDay:true};
   if(etMin>=570&&etMin<960) return {name:'MKT',       minChg:20, minVol:10_000_000, useDay:true };
   if(etMin>=960&&etMin<1200)return {name:'AH',        minChg:10, minVol:0,          useDay:false};
   return null;
