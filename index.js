@@ -15,7 +15,7 @@ const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM
 //
 //  EARLY-PRE  4:00–7:00 AM   ≥10% gain   vol = 0   (day.v is near-zero before open)
 //  LATE-PRE   7:00–9:30 AM   ≥20% gain   vol = 0   (still pre-market, vol is thin)
-//  MKT        9:30AM–4:00PM  ≥20% gain   vol ≥ 5M  (real market hours, vol built up)
+//  MKT        9:30AM–4:00PM  ≥10% gain   vol ≥ 5M
 //  AH         4:00–8:00 PM   ≥10% gain   vol = 0
 //
 //  Vol is ONLY enforced during regular market hours (MKT).
@@ -27,7 +27,7 @@ const MAIN_CHAT_WH   = 'https://discord.com/api/webhooks/1493985046074491060/PVM
 function getTier(etMin) {
   if(etMin>=240&&etMin<420)  return {name:'EARLY-PRE', minChg:10, minVol:0};
   if(etMin>=420&&etMin<570)  return {name:'LATE-PRE',  minChg:20, minVol:0};
-  if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:20, minVol:5_000_000};
+  if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:10, minVol:5_000_000};
   if(etMin>=960&&etMin<1200) return {name:'AH',        minChg:10, minVol:0};
   return null;
 }
@@ -655,7 +655,7 @@ async function main(){
   if(!POLY_KEY)      {console.error('FATAL: POLY_KEY missing');process.exit(1);}
   if(!DISCORD_TOKEN) {console.error('FATAL: DISCORD_TOKEN missing');process.exit(1);}
   console.log('🤖 AziziBot v8 starting...');
-  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%/noVol | LATE-PRE 7-9:30AM ≥20%/noVol | MKT ≥20%/10M | AH ≥10%/noVol');
+  console.log('[Tiers] EARLY-PRE 4-7AM ≥10%/noVol | LATE-PRE 7-9:30AM ≥20%/noVol | MKT ≥10%/5M | AH ≥10%/noVol');
   console.log('[Key]   Vol floor = 0 for all pre-market. % gain is the only pre-market quality gate.');
 
   await refreshEtfList();
