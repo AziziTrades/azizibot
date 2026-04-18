@@ -47,7 +47,63 @@ function getET() {
   return {hh,m,s,etMin,timeStr,sess};
 }
 
-function isActive()  { return !!getTier(getET().etMin); }
+// ─── Market day check (weekends + US holidays) ───────────────────────────────
+function isMarketDay() {
+  const now = new Date();
+  const et  = new Date(now.toLocaleString('en-US',{timeZone:'America/New_York'}));
+  const dow = et.getDay(); // 0=Sun 6=Sat
+  if(dow===0||dow===6) return false;
+  const y=et.getFullYear(), m=et.getMonth()+1, d=et.getDate();
+
+  function nthWeekday(yr,mo,wd,n){
+    const first=new Date(yr,mo-1,1);
+    return 1+((wd-first.getDay()+7)%7)+(n-1)*7;
+  }
+  function lastWeekday(yr,mo,wd){
+    const last=new Date(yr,mo,0);
+    return last.getDate()-((last.getDay()-wd+7)%7);
+  }
+  function obs(yr,mo,dy){
+    const w=new Date(yr,mo-1,dy).getDay();
+    if(w===6) return {m:mo,d:dy-1};
+    if(w===0) return {m:mo,d:dy+1};
+    return {m:mo,d:dy};
+  }
+  function easter(yr){
+    const a=yr%19,b=Math.floor(yr/100),c=yr%100,
+          dv=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),
+          g=Math.floor((b-f+1)/3),h=(19*a+b-dv-g+15)%30,
+          i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,
+          mm=Math.floor((a+11*h+22*l)/451),
+          mo=Math.floor((h+l-7*mm+114)/31),
+          dy=((h+l-7*mm+114)%31)+1;
+    return {m:mo,d:dy};
+  }
+
+  const ea=easter(y);
+  const gf=new Date(y,ea.m-1,ea.d-2); // Good Friday
+
+  const holidays=[
+    obs(y,1,1),                              // New Year's Day
+    {m:1,  d:nthWeekday(y,1,1,3)},           // MLK Day
+    {m:2,  d:nthWeekday(y,2,1,3)},           // Presidents Day
+    {m:gf.getMonth()+1, d:gf.getDate()},     // Good Friday
+    {m:5,  d:lastWeekday(y,5,1)},            // Memorial Day
+    obs(y,6,19),                             // Juneteenth
+    obs(y,7,4),                              // Independence Day
+    {m:9,  d:nthWeekday(y,9,1,1)},           // Labor Day
+    {m:11, d:nthWeekday(y,11,4,4)},          // Thanksgiving
+    obs(y,12,25),                            // Christmas
+  ];
+
+  if(holidays.some(h=>h.m===m&&h.d===d)){
+    console.log(`[Market] Holiday — no alerts today`);
+    return false;
+  }
+  return true;
+}
+
+function isActive()  { return isMarketDay() && !!getTier(getET().etMin); }
 function sleep(ms)   { return new Promise(r=>setTimeout(r,ms)); }
 function fmtN(n)     { if(!n||isNaN(n))return'--'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'K'; return String(n); }
 function fmtRVol(r)  { if(!r||isNaN(r)||r===0)return'--'; if(r>=1000)return Math.round(r).toLocaleString()+'x'; if(r>=10)return r.toFixed(0)+'x'; return r.toFixed(1)+'x'; }
