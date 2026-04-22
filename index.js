@@ -378,8 +378,7 @@ async function fireNHOD(ticker,price){
   if(!gapper) return;
 
   const s=state.tickers.get(ticker);
-  if(!s)                  {console.log(`[NHOD] ${ticker} skip: no state`);return;}
-  if(price<=s.high+0.001) {console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} ≤ high $${s.high.toFixed(4)}`);return;}
+  if(!s){console.log(`[NHOD] ${ticker} skip: no state`);return;}
 
   const {etMin,timeStr}=getET();
   if(price>10)   {console.log(`[NHOD] ${ticker} skip: >$10`);return;}
@@ -406,43 +405,51 @@ async function fireNHOD(ticker,price){
     console.log(`[NHOD] ${ticker} skip: max 3/day`);return;
   }
 
-  // ── Validate this is a genuine new high ──────────────────────────────────
-  // We track the true session high ourselves via priceHistory (WS feed).
-  // td.day.h from Polygon is unreliable pre-market (often 0 or missing the
-  // pre-market peak), so we compute our own trueHigh.
-  const hist2=(s.priceHistory)||[];
-  const histHigh = hist2.length>0 ? Math.max(...hist2.map(h=>h.price)) : 0;
-  const trueHigh = Math.max(s.high, histHigh);
+  // ── Fetch live snapshot first to get true session high ───────────────────
+  // We do this BEFORE committing anything. We combine:
+  //   1. Polygon's day.h  (reliable by 6AM+, includes all pre-market trades)
+  //   2. Our priceHistory max  (WS ticks we received this session)
+  //   3. Our stored s.high  (best value from last refresh)
+  // The max of all three is the authoritative true session high.
+  const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+  const td=snap&&snap.ticker;
+  const polyDayHigh  = (td&&td.day&&td.day.h)||0;
+  const histHigh     = s.priceHistory&&s.priceHistory.length>0 ? Math.max(...s.priceHistory.map(h=>h.price)) : 0;
+  const trueHigh     = Math.max(s.high, polyDayHigh, histHigh);
 
-  // If price is more than 2% below the highest price we've ever seen for this
-  // ticker today, it's a pullback tick — not a real new high. Skip it and
-  // correct our stored high.
+  // Always sync our stored high to trueHigh so future ticks are correct
+  if(trueHigh>s.high) state.tickers.set(ticker,{...s,high:trueHigh});
+
+  // If the incoming WS tick is more than 2% below the true session high,
+  // the stock has already pulled back — this is not a genuine new high
   if(trueHigh>0 && price < trueHigh*0.98){
-    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} is ${((trueHigh-price)/trueHigh*100).toFixed(1)}% below true high $${trueHigh.toFixed(4)} — pullback, not NHOD`);
-    state.tickers.set(ticker,{...s,high:trueHigh});
+    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} is ${((trueHigh-price)/trueHigh*100).toFixed(1)}% below true high $${trueHigh.toFixed(4)}`);
     return;
   }
   // ─────────────────────────────────────────────────────────────────────────
 
-  const nhod=(s.nhod||0)+1;
-  state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
+  // Re-check against updated trueHigh (may have changed above)
+  const updatedS = state.tickers.get(ticker)||s;
+  if(price <= updatedS.high+0.001){
+    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} ≤ updated high $${updatedS.high.toFixed(4)}`);
+    return;
+  }
+
+  const nhod=(updatedS.nhod||0)+1;
+  state.tickers.set(ticker,{...updatedS,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:updatedS.priceHistory||[]});
   state.dailyCounts.set(ticker,(state.dailyCounts.get(ticker)||0)+1);
-  console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
+  console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''} (trueHigh was $${trueHigh.toFixed(4)})`);
 
-  // Fresh snapshot for live vol/rvol/chgPct in the alert message
-  const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-  const td=snap&&snap.ticker;
+  // Live vol/rvol/chgPct from the snapshot we already fetched
   const livePrice= (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||price;
-
-  const [newsUrl,rs,det,fv,greenBars]=await Promise.all([
-    getNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getFinvizStats(ticker),getGreenBars(ticker),
-  ]);
-
-  // Live vol/rvol/chgPct from fresh snapshot
   const liveVol  = (td&&td.day&&td.day.v)||gapper.volume||0;
   const livePrev = (td&&td.prevDay&&td.prevDay.v)||gapper.prevVol||0;
   const livePct  = (()=>{const p=livePrice;const pv=(td&&td.prevDay&&td.prevDay.c)||0;return p&&pv?((p-pv)/pv)*100:gapper.chgPct;})();
   const liveRvol = livePrev>0?(liveVol*390)/(Math.max(etMin-240,1)*livePrev):gapper.rvol||0;
+
+  const [newsUrl,rs,det,fv,greenBars]=await Promise.all([
+    getNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getFinvizStats(ticker),getGreenBars(ticker),
+  ]);
 
   const mc=det.market_cap||0;
   const rsStr=rs?` | ${rs}`:'';
