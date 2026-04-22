@@ -406,14 +406,41 @@ async function fireNHOD(ticker,price){
     console.log(`[NHOD] ${ticker} skip: max 3/day`);return;
   }
 
+  // ── Fetch fresh snapshot BEFORE committing the alert ─────────────────────
+  // Validate that price is genuinely the new high of day right now.
+  // This prevents false NHODs from stale WS ticks when the stock is dropping.
+  const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+  const td=snap&&snap.ticker;
+  const actualDayHigh=(td&&td.day&&td.day.h)||0;
+  const livePrice    =(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||price;
+
+  // If live price is more than 1% below the actual day high, the stock has
+  // already pulled back — this tick is stale or it's not a real new high.
+  if(actualDayHigh>0 && livePrice < actualDayHigh*0.99){
+    console.log(`[NHOD] ${ticker} skip: live $${livePrice.toFixed(4)} is below day high $${actualDayHigh.toFixed(4)} — not a real NHOD`);
+    // Update our stored high to the real day high so future ticks work correctly
+    state.tickers.set(ticker,{...s,high:actualDayHigh});
+    return;
+  }
+
+  // Also update stored high to actual day high so we never go backwards
+  if(actualDayHigh>s.high) state.tickers.set(ticker,{...s,high:actualDayHigh});
+  // ─────────────────────────────────────────────────────────────────────────
+
   const nhod=(s.nhod||0)+1;
-  state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
+  state.tickers.set(ticker,{...state.tickers.get(ticker)||s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
   state.dailyCounts.set(ticker,(state.dailyCounts.get(ticker)||0)+1);
   console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
 
   const [newsUrl,rs,det,fv,greenBars]=await Promise.all([
     getNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getFinvizStats(ticker),getGreenBars(ticker),
   ]);
+
+  // Live vol/rvol/chgPct from fresh snapshot
+  const liveVol  = (td&&td.day&&td.day.v)||gapper.volume||0;
+  const livePrev = (td&&td.prevDay&&td.prevDay.v)||gapper.prevVol||0;
+  const livePct  = (()=>{const p=livePrice;const pv=(td&&td.prevDay&&td.prevDay.c)||0;return p&&pv?((p-pv)/pv)*100:gapper.chgPct;})();
+  const liveRvol = livePrev>0?(liveVol*390)/(Math.max(etMin-240,1)*livePrev):gapper.rvol||0;
 
   const mc=det.market_cap||0;
   const rsStr=rs?` | ${rs}`:'';
@@ -435,11 +462,11 @@ async function fireNHOD(ticker,price){
   const {sess}=getET();
   const sessLabel=nhod===1?(sess==='PRE'?'PMH':sess==='AH'?'AHs':'NSH'):`${nhod} NHOD`;
   const tLink=newsUrl?`[${ticker}](<${newsUrl}>)`:`**${ticker}**`;
-  const pctStr=`+${gapper.chgPct.toFixed(1)}%`;
+  const pctStr=`+${livePct.toFixed(1)}%`;
   const mcLine=mc>0?` | MC: ${fmtN(mc)}`:'';
   const extra=[fv.float!=='--'?`Float: ${fv.float}`:'',fv.si!=='--'?`SI: ${fv.si}`:'',fv.io!=='--'?`IO: ${fv.io}`:''].filter(Boolean).join(' | ');
   const extraStr=extra?`\n> ${extra}`:'';
-  const line=`\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(gapper.rvol)} | Vol: ${fmtN(gapper.volume)}${regSHO}${rsStr}${prStr}${extraStr}`;
+  const line=`\`${timeStr}\` ↗ ${tLink} \`${priceFlag(price)}\` **${pctStr}** · ${sessLabel}${afterLull}${greenStr} ~ ${flag(ticker)}${mcLine} | RVol: ${fmtRVol(liveRvol)} | Vol: ${fmtN(liveVol)}${regSHO}${rsStr}${prStr}${extraStr}`;
   await post({content:line});
   console.log(`[ALERT] posted OK`);
 }
