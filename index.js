@@ -406,31 +406,33 @@ async function fireNHOD(ticker,price){
     console.log(`[NHOD] ${ticker} skip: max 3/day`);return;
   }
 
-  // ── Fetch fresh snapshot BEFORE committing the alert ─────────────────────
-  // Validate that price is genuinely the new high of day right now.
-  // This prevents false NHODs from stale WS ticks when the stock is dropping.
-  const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-  const td=snap&&snap.ticker;
-  const actualDayHigh=(td&&td.day&&td.day.h)||0;
-  const livePrice    =(td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||price;
+  // ── Validate this is a genuine new high ──────────────────────────────────
+  // We track the true session high ourselves via priceHistory (WS feed).
+  // td.day.h from Polygon is unreliable pre-market (often 0 or missing the
+  // pre-market peak), so we compute our own trueHigh.
+  const hist2=(s.priceHistory)||[];
+  const histHigh = hist2.length>0 ? Math.max(...hist2.map(h=>h.price)) : 0;
+  const trueHigh = Math.max(s.high, histHigh);
 
-  // If live price is more than 1% below the actual day high, the stock has
-  // already pulled back — this tick is stale or it's not a real new high.
-  if(actualDayHigh>0 && livePrice < actualDayHigh*0.99){
-    console.log(`[NHOD] ${ticker} skip: live $${livePrice.toFixed(4)} is below day high $${actualDayHigh.toFixed(4)} — not a real NHOD`);
-    // Update our stored high to the real day high so future ticks work correctly
-    state.tickers.set(ticker,{...s,high:actualDayHigh});
+  // If price is more than 2% below the highest price we've ever seen for this
+  // ticker today, it's a pullback tick — not a real new high. Skip it and
+  // correct our stored high.
+  if(trueHigh>0 && price < trueHigh*0.98){
+    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} is ${((trueHigh-price)/trueHigh*100).toFixed(1)}% below true high $${trueHigh.toFixed(4)} — pullback, not NHOD`);
+    state.tickers.set(ticker,{...s,high:trueHigh});
     return;
   }
-
-  // Also update stored high to actual day high so we never go backwards
-  if(actualDayHigh>s.high) state.tickers.set(ticker,{...s,high:actualDayHigh});
   // ─────────────────────────────────────────────────────────────────────────
 
   const nhod=(s.nhod||0)+1;
-  state.tickers.set(ticker,{...state.tickers.get(ticker)||s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
+  state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
   state.dailyCounts.set(ticker,(state.dailyCounts.get(ticker)||0)+1);
   console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
+
+  // Fresh snapshot for live vol/rvol/chgPct in the alert message
+  const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+  const td=snap&&snap.ticker;
+  const livePrice= (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||price;
 
   const [newsUrl,rs,det,fv,greenBars]=await Promise.all([
     getNewsUrl(ticker),getRecentSplit(ticker),getTickerDetails(ticker),getFinvizStats(ticker),getGreenBars(ticker),
