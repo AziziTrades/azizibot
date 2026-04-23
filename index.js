@@ -378,7 +378,8 @@ async function fireNHOD(ticker,price){
   if(!gapper) return;
 
   const s=state.tickers.get(ticker);
-  if(!s){console.log(`[NHOD] ${ticker} skip: no state`);return;}
+  if(!s)                  {console.log(`[NHOD] ${ticker} skip: no state`);return;}
+  if(price<=s.high+0.001) {console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`);return;}
 
   const {etMin,timeStr}=getET();
   if(price>10)   {console.log(`[NHOD] ${ticker} skip: >$10`);return;}
@@ -405,34 +406,12 @@ async function fireNHOD(ticker,price){
     console.log(`[NHOD] ${ticker} skip: max 3/day`);return;
   }
 
-  // ── Validate this is a genuine new high ──────────────────────────────────
-  // Use our own tracked high (from WS feed + state) as the source of truth.
-  // We intentionally do NOT use td.day.h from Polygon here because it can
-  // reflect stale/future candle data that's higher than the live WS price,
-  // which would block every legitimate new high.
-  // td.day.h IS used in refreshGappers when we first initialize s.high.
-  const histHigh = s.priceHistory&&s.priceHistory.length>0 ? Math.max(...s.priceHistory.map(h=>h.price)) : 0;
-  const trueHigh = Math.max(s.high, histHigh);
-
-  if(price <= trueHigh+0.001){
-    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} ≤ true high $${trueHigh.toFixed(4)}`);
-    return;
-  }
-
-  // If price is more than 2% below the true high, it's a pullback tick
-  if(trueHigh>0 && price < trueHigh*0.98){
-    console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} is ${((trueHigh-price)/trueHigh*100).toFixed(1)}% below true high $${trueHigh.toFixed(4)}`);
-    state.tickers.set(ticker,{...s,high:trueHigh});
-    return;
-  }
-  // ─────────────────────────────────────────────────────────────────────────
-
   const nhod=(s.nhod||0)+1;
   state.tickers.set(ticker,{...s,high:price,nhod,lastAlertPrice:price,lastAlertTime:Date.now(),priceHistory:s.priceHistory||[]});
   state.dailyCounts.set(ticker,(state.dailyCounts.get(ticker)||0)+1);
   console.log(`[ALERT] ↗ ${ticker} $${price.toFixed(4)} x${nhod}${isWatchOnly?' [watch]':''}`);
 
-  // Fresh snapshot for live vol/rvol/chgPct in the alert message
+  // Fresh snapshot for live vol/rvol/chgPct
   const snap=await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
   const td=snap&&snap.ticker;
   const livePrice= (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||price;
@@ -623,7 +602,8 @@ function connectPriceWS(){
           if(!s.priceHistory) s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
           if(s.priceHistory.length>60) s.priceHistory.shift();
-          if(price>s.high+0.001){
+          const prevHigh=s.high; if(price>prevHigh) s.high=price;
+          if(price>prevHigh+0.001){
             const last=wsDebounce.get(ticker)||0;
             if(Date.now()-last>10000){
               console.log(`[PriceWS] ${ticker} NEW HIGH $${price.toFixed(4)} (was $${s.high.toFixed(4)})`);
