@@ -602,7 +602,7 @@ function connectPriceWS(){
           if(!s.priceHistory) s.priceHistory=[];
           s.priceHistory.push({price,time:Date.now()});
           if(s.priceHistory.length>60) s.priceHistory.shift();
-          const prevHigh=s.high; if(price>prevHigh) s.high=price;
+          const prevHigh=s.high;
           if(price>prevHigh+0.001){
             const last=wsDebounce.get(ticker)||0;
             if(Date.now()-last>10000){
