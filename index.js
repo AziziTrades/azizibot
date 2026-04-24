@@ -385,6 +385,9 @@ async function fireNHOD(ticker,price){
   if(price>10)   {console.log(`[NHOD] ${ticker} skip: >$10`);return;}
   if(price<0.10) {console.log(`[NHOD] ${ticker} skip: <$0.10`);return;}
 
+  // Watchlist-only tickers do not fire in AH — they had their chance during MKT
+  if(isWatchOnly && getET().sess==='AH') return;
+
   if(!isWatchOnly){
     const tier=getTier(etMin);
     if(!tier) return;
