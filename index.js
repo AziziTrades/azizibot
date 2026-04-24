@@ -28,7 +28,7 @@ function getTier(etMin) {
   if(etMin>=240&&etMin<420)  return {name:'EARLY-PRE', minChg:10, minVol:0};
   if(etMin>=420&&etMin<570)  return {name:'LATE-PRE',  minChg:20, minVol:0};
   if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:10, minVol:5_000_000};
-  if(etMin>=960&&etMin<1200) return {name:'AH',        minChg:10, minVol:0};
+  if(etMin>=960&&etMin<1200) return {name:'AH',        minChg:10, minVol:500_000};
   return null;
 }
 
@@ -552,7 +552,39 @@ async function checkFilings(){
   }
 }
 
-// ─── Morning Snapshot ─────────────────────────────────────────────────────────
+// ─── Session transition sync ──────────────────────────────────────────────────
+// At 4PM (MKT→AH), sync s.high for all watchlist tickers from live snapshots.
+// Without this, stale s.high values cause every watchlist ticker to fire
+// simultaneously the moment AH begins.
+let lastTransitionSync = 0;
+async function syncHighsAtTransition() {
+  const {etMin} = getET();
+  // Only run once when AH starts (etMin 960–961 = 4:00–4:01 PM)
+  if(etMin < 960 || etMin > 961) return;
+  if(Date.now() - lastTransitionSync < 60*60*1000) return; // once per hour max
+  lastTransitionSync = Date.now();
+
+  const tickers = [...new Set([...topGappers.map(g=>g.ticker), ...dayWatchlist.keys()])];
+  if(!tickers.length) return;
+  console.log(`[Transition] MKT→AH syncing highs for ${tickers.length} tickers...`);
+
+  for(const ticker of tickers) {
+    try {
+      const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+      const td = snap&&snap.ticker;
+      const dayHigh = (td&&td.day&&td.day.h)||0;
+      if(dayHigh > 0) {
+        const s = state.tickers.get(ticker);
+        if(s && dayHigh > s.high) {
+          state.tickers.set(ticker, {...s, high: dayHigh});
+          console.log(`[Transition] ${ticker} high synced $${s.high.toFixed(4)} → $${dayHigh.toFixed(4)}`);
+        }
+      }
+    } catch(e) {}
+    await sleep(100);
+  }
+  console.log(`[Transition] Done`);
+}
 async function checkMorningSnapshot(){
   const {hh,m}=getET();
   if((hh!==6&&hh!==7)||m!==0) return;
@@ -744,6 +776,7 @@ async function main(){
     if(hh===0&&m<1){state.dailyCounts.clear();state.tickers.clear();state.sentFilings.clear();dayWatchlist.clear();console.log('[Daily] Reset');}
     await checkMorningSnapshot();
     await checkFilings();
+    await syncHighsAtTransition();
   },60*1000);
 
   console.log('🤖 AziziBot v8 running.');
