@@ -28,7 +28,8 @@ function getTier(etMin) {
   if(etMin>=240&&etMin<420)  return {name:'EARLY-PRE', minChg:10, minVol:0};
   if(etMin>=420&&etMin<570)  return {name:'LATE-PRE',  minChg:20, minVol:0};
   if(etMin>=570&&etMin<960)  return {name:'MKT',       minChg:10, minVol:5_000_000};
-  return null; // no alerts after 4PM
+  if(etMin>=960&&etMin<1200) return {name:"AH", minChg:10, minVol:500000};
+  return null;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -384,24 +385,14 @@ async function fireNHOD(ticker,price){
   if(price>10)   {console.log(`[NHOD] ${ticker} skip: >$10`);return;}
   if(price<0.10) {console.log(`[NHOD] ${ticker} skip: <$0.10`);return;}
 
-  // Watchlist-only tickers do not fire in AH — they had their chance during MKT
-  if(isWatchOnly && getET().sess==='AH') return;
-
-  if(!isWatchOnly){
-    const tier=getTier(etMin);
-    if(!tier) return;
-    if(gapper.chgPct<tier.minChg){
-      console.log(`[NHOD] ${ticker} skip: ${tier.name} chg ${gapper.chgPct.toFixed(1)}%<${tier.minChg}%`);return;
-    }
-    if(tier.minVol>0&&gapper.volume<tier.minVol){
-      console.log(`[NHOD] ${ticker} skip: ${tier.name} vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
-    }
-  } else {
-    // Watchlist-only: still enforce vol gate in AH to prevent post-close spam
-    const tier=getTier(etMin);
-    if(tier&&tier.minVol>0&&gapper.volume<tier.minVol){
-      console.log(`[NHOD] ${ticker} skip: [watch] AH vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
-    }
+  // All tickers (live + watchlist) must pass the current session tier gates
+  const tier=getTier(etMin);
+  if(!tier) return;
+  if(gapper.chgPct<tier.minChg){
+    console.log(`[NHOD] ${ticker} skip: ${tier.name} chg ${gapper.chgPct.toFixed(1)}%<${tier.minChg}%`);return;
+  }
+  if(tier.minVol>0&&gapper.volume<tier.minVol){
+    console.log(`[NHOD] ${ticker} skip: ${tier.name} vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
   }
 
   if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.075){
