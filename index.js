@@ -394,6 +394,12 @@ async function fireNHOD(ticker,price){
     if(tier.minVol>0&&gapper.volume<tier.minVol){
       console.log(`[NHOD] ${ticker} skip: ${tier.name} vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
     }
+  } else {
+    // Watchlist-only: still enforce vol gate in AH to prevent post-close spam
+    const tier=getTier(etMin);
+    if(tier&&tier.minVol>0&&gapper.volume<tier.minVol){
+      console.log(`[NHOD] ${ticker} skip: [watch] AH vol ${fmtN(gapper.volume)}<${fmtN(tier.minVol)}`);return;
+    }
   }
 
   if(s.lastAlertPrice>0&&price<s.lastAlertPrice*1.075){
@@ -553,37 +559,38 @@ async function checkFilings(){
 }
 
 // ─── Session transition sync ──────────────────────────────────────────────────
-// At 4PM (MKT→AH), sync s.high for all watchlist tickers from live snapshots.
-// Without this, stale s.high values cause every watchlist ticker to fire
-// simultaneously the moment AH begins.
+// At 4PM (MKT→AH), reset s.high for every tracked ticker to its current live
+// price. This prevents all watchlist tickers firing simultaneously when AH
+// starts just because their stored high is below the current price.
 let lastTransitionSync = 0;
 async function syncHighsAtTransition() {
   const {etMin} = getET();
-  // Only run once when AH starts (etMin 960–961 = 4:00–4:01 PM)
-  if(etMin < 960 || etMin > 961) return;
-  if(Date.now() - lastTransitionSync < 60*60*1000) return; // once per hour max
+  if(etMin < 960 || etMin > 975) return; // 4:00–4:15PM window
+  if(Date.now() - lastTransitionSync < 60*60*1000) return;
   lastTransitionSync = Date.now();
 
   const tickers = [...new Set([...topGappers.map(g=>g.ticker), ...dayWatchlist.keys()])];
   if(!tickers.length) return;
-  console.log(`[Transition] MKT→AH syncing highs for ${tickers.length} tickers...`);
+  console.log(`[Transition] MKT→AH: resetting highs for ${tickers.length} tickers...`);
 
   for(const ticker of tickers) {
     try {
       const snap = await polyGet(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-      const td = snap&&snap.ticker;
-      const dayHigh = (td&&td.day&&td.day.h)||0;
-      if(dayHigh > 0) {
+      const td   = snap&&snap.ticker;
+      const cur  = (td&&td.lastTrade&&td.lastTrade.p)||(td&&td.day&&td.day.c)||0;
+      if(cur > 0) {
         const s = state.tickers.get(ticker);
-        if(s && dayHigh > s.high) {
-          state.tickers.set(ticker, {...s, high: dayHigh});
-          console.log(`[Transition] ${ticker} high synced $${s.high.toFixed(4)} → $${dayHigh.toFixed(4)}`);
+        if(s) {
+          state.tickers.set(ticker, {...s, high:cur, nhod:0, lastAlertPrice:0, lastAlertTime:0});
+          console.log(`[Transition] ${ticker} reset high→$${cur.toFixed(4)}`);
         }
       }
     } catch(e) {}
     await sleep(100);
   }
-  console.log(`[Transition] Done`);
+  // Also reset daily counts so AH is a fresh slate
+  state.dailyCounts.clear();
+  console.log(`[Transition] Done — AH slate is clean`);
 }
 async function checkMorningSnapshot(){
   const {hh,m}=getET();
