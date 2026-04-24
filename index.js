@@ -379,7 +379,10 @@ async function fireNHOD(ticker,price){
 
   const s=state.tickers.get(ticker);
   if(!s)                  {console.log(`[NHOD] ${ticker} skip: no state`);return;}
-  if(price<=s.high+0.001) {console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not above high $${s.high.toFixed(4)}`);return;}
+  // In AH, require 2% above stored high to avoid firing on tiny ticks
+  const {sess:_sess}=getET();
+  const minAbove = _sess==='AH' ? s.high*1.02 : s.high+0.001;
+  if(price<=minAbove) {console.log(`[NHOD] ${ticker} skip: $${price.toFixed(4)} not enough above high $${s.high.toFixed(4)}`);return;}
 
   const {etMin,timeStr}=getET();
   if(price>10)   {console.log(`[NHOD] ${ticker} skip: >$10`);return;}
