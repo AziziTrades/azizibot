@@ -278,6 +278,7 @@ const wsDebounce=new Map();
 // ─── Gapper refresh ───────────────────────────────────────────────────────────
 async function refreshGappers(){
   try{
+    if(!isMarketDay()) return;
     const {etMin,timeStr}=getET();
     const tier=getTier(etMin);
     if(!tier) return;
@@ -589,6 +590,7 @@ async function syncHighsAtTransition() {
   console.log(`[Transition] Done — AH slate is clean`);
 }
 async function checkMorningSnapshot(){
+  if(!isMarketDay()) return;
   const {hh,m}=getET();
   if((hh!==6&&hh!==7)||m!==0) return;
   const key=`${new Date().toISOString().slice(0,10)}_${hh}`;
